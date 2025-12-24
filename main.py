@@ -6,7 +6,13 @@ from bson.objectid import ObjectId
 import bcrypt
 
 # =====================================================
-# CONFIG (SECURE)
+# HELPERS
+# =====================================================
+def to_utc_datetime(d: date) -> datetime:
+    return datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
+
+# =====================================================
+# CONFIG
 # =====================================================
 MONGO_URI = st.secrets["mongo"]
 DB_NAME = "nc_ops"
@@ -27,7 +33,6 @@ st.set_page_config("NC Operations System", layout="wide")
 # CONSTANTS
 # =====================================================
 LEAVE_TYPES = ["CL", "SL", "COURSE"]
-
 MEETING_SCOPE = ["Pan India", "State-wise", "With DCs", "With NCs"]
 
 today = date.today()
@@ -53,32 +58,25 @@ if not st.session_state.user:
         st.stop()
 
     if user_doc:
-
-        # ---------- FIRST LOGIN ----------
         if user_doc.get("first_login", False):
             st.subheader("First-Time Login – Create Password")
-
             p1 = st.text_input("Create Password", type="password")
             p2 = st.text_input("Confirm Password", type="password")
 
             if st.button("Set Password"):
                 if not p1 or p1 != p2:
-                    st.error("Passwords are empty or do not match")
+                    st.error("Passwords invalid")
                 else:
                     users_col.update_one(
                         {"_id": user_doc["_id"]},
                         {"$set": {
-                            "password_hash": bcrypt.hashpw(
-                                p1.encode(), bcrypt.gensalt()
-                            ),
+                            "password_hash": bcrypt.hashpw(p1.encode(), bcrypt.gensalt()),
                             "first_login": False,
                             "updated_at": datetime.now(timezone.utc)
                         }}
                     )
-                    st.success("Password created. Please login again.")
+                    st.success("Password set. Login again.")
                     st.stop()
-
-        # ---------- NORMAL LOGIN ----------
         else:
             password = st.text_input("Password", type="password")
             if st.button("Login"):
@@ -114,9 +112,10 @@ if menu == "Dashboard":
 
     if is_nc:
         sel_date = st.date_input("Select Date", today)
+        sel_dt = to_utc_datetime(sel_date)
 
         def show(title, col):
-            data = list(col.find({"date": sel_date}))
+            data = list(col.find({"date": sel_dt}))
             if data:
                 st.subheader(title)
                 st.dataframe(pd.DataFrame(data))
@@ -131,52 +130,13 @@ if menu == "Dashboard":
             list(call_logs_col.find({"user": user["email"]})) +
             list(meeting_logs_col.find({"user": user["email"]}))
         )
-        if logs:
-            st.dataframe(pd.DataFrame(logs))
-        else:
-            st.info("No activity logged yet")
-
-# =====================================================
-# TASKS
-# =====================================================
-elif menu == "Tasks":
-    st.title("📝 Tasks")
-
-    title = st.text_input("Task Title *")
-    desc = st.text_area("Task Description *")
-    start = st.date_input("Start Date *")
-    end = st.date_input("End Date *")
-
-    assigned_to = st.text_input("Assign To (Email) *") if is_nc else user["email"]
-
-    if st.button("Create Task"):
-        if not all([title.strip(), desc.strip(), start, end, assigned_to.strip()]):
-            st.error("All fields are mandatory")
-        else:
-            tasks_col.insert_one({
-                "title": title,
-                "description": desc,
-                "start_date": start,
-                "end_date": end,
-                "assigned_to": assigned_to,
-                "created_by": user["email"],
-                "status": "To Do",
-                "created_at": datetime.now(timezone.utc)
-            })
-            st.success("Task created")
-
-    st.divider()
-    for t in tasks_col.find():
-        if is_nc or t["assigned_to"] == user["email"]:
-            with st.expander(f"{t['title']} → {t['assigned_to']}"):
-                st.write(t["description"])
-                st.write(f"{t['start_date']} → {t['end_date']}")
+        st.dataframe(pd.DataFrame(logs)) if logs else st.info("No logs yet")
 
 # =====================================================
 # DAILY LOGS
 # =====================================================
 elif menu == "Daily Logs":
-    st.title("🗓️ Daily Work Log (Mandatory)")
+    st.title("🗓️ Daily Work Log")
 
     if is_nc:
         st.info("NCs can monitor only")
@@ -188,97 +148,54 @@ elif menu == "Daily Logs":
         min_value=editable_from,
         max_value=today
     )
+    log_dt = to_utc_datetime(log_date)
 
-    if leave_col.find_one({"user": user["email"], "date": log_date, "status": "Approved"}):
-        st.warning("On approved leave. Auto log applied.")
+    if leave_col.find_one({"user": user["email"], "date": log_dt, "status": "Approved"}):
         task_logs_col.update_one(
-            {"user": user["email"], "date": log_date},
+            {"user": user["email"], "date": log_dt},
             {"$set": {
                 "user": user["email"],
-                "date": log_date,
+                "date": log_dt,
                 "task_id": None,
                 "description": "No work done – On Leave",
                 "updated_at": datetime.now(timezone.utc)
             }},
             upsert=True
         )
+        st.warning("On approved leave")
         st.stop()
 
     my_tasks = list(tasks_col.find({"assigned_to": user["email"]}))
-
     if not my_tasks:
-        st.error("No tasks assigned. Reason is mandatory.")
         reason = st.text_area("Reason *")
-        if st.button("Submit"):
-            if reason.strip():
-                task_logs_col.insert_one({
-                    "user": user["email"],
-                    "date": log_date,
-                    "task_id": None,
-                    "description": reason,
-                    "created_at": datetime.now(timezone.utc)
-                })
-                st.success("Log saved")
+        if st.button("Submit") and reason.strip():
+            task_logs_col.insert_one({
+                "user": user["email"],
+                "date": log_dt,
+                "task_id": None,
+                "description": reason,
+                "created_at": datetime.now(timezone.utc)
+            })
+            st.success("Logged")
         st.stop()
 
     task_map = {t["title"]: t["_id"] for t in my_tasks}
     task = st.selectbox("Task *", list(task_map.keys()))
     desc = st.text_area("Work Done *")
 
-    if st.button("Submit Task Log"):
-        if not desc.strip():
-            st.error("Description is mandatory")
-        else:
-            task_logs_col.update_one(
-                {"user": user["email"], "date": log_date},
-                {"$set": {
-                    "user": user["email"],
-                    "date": log_date,
-                    "task_id": task_map[task],
-                    "description": desc,
-                    "updated_at": datetime.now(timezone.utc)
-                }},
-                upsert=True
-            )
-            st.success("Daily log saved")
-
-# =====================================================
-# LEAVE
-# =====================================================
-elif menu == "Leave":
-    st.title("🌴 Leave")
-
-    if not is_nc:
-        ltype = st.selectbox("Leave Type *", LEAVE_TYPES)
-        ldate = st.date_input("Leave Date *")
-        reason = st.text_area("Reason *")
-
-        if st.button("Apply Leave"):
-            if reason.strip():
-                leave_col.insert_one({
-                    "user": user["email"],
-                    "type": ltype,
-                    "date": ldate,
-                    "reason": reason,
-                    "status": "Pending",
-                    "created_at": datetime.now(timezone.utc)
-                })
-                st.success("Leave applied")
-
-    else:
-        st.subheader("Approve Leaves")
-        for l in leave_col.find({"status": "Pending"}):
-            with st.expander(f"{l['user']} | {l['type']} | {l['date']}"):
-                st.write(l["reason"])
-                if st.button("Approve", key=str(l["_id"])):
-                    leave_col.update_one(
-                        {"_id": l["_id"]},
-                        {"$set": {
-                            "status": "Approved",
-                            "approved_at": datetime.now(timezone.utc)
-                        }}
-                    )
-                    st.success("Approved")
+    if st.button("Submit Task Log") and desc.strip():
+        task_logs_col.update_one(
+            {"user": user["email"], "date": log_dt},
+            {"$set": {
+                "user": user["email"],
+                "date": log_dt,
+                "task_id": task_map[task],
+                "description": desc,
+                "updated_at": datetime.now(timezone.utc)
+            }},
+            upsert=True
+        )
+        st.success("Saved")
 
 # =====================================================
 # LOGOUT
