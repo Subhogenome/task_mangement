@@ -10,7 +10,7 @@ def to_utc(d):
     return datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
 
 # ================= CONFIG =================
-MONGO_URI = st.secrets["mongo"]["uri"]
+MONGO_URI = st.secrets["mongo"]
 client = MongoClient(MONGO_URI)
 db = client["nc_ops"]
 
