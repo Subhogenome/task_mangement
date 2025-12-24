@@ -14,7 +14,7 @@ def to_utc_datetime(d: date) -> datetime:
 # =====================================================
 # CONFIG
 # =====================================================
-MONGO_URI = st.secrets["mongo"]["uri"]
+MONGO_URI = st.secrets["mongo"]
 DB_NAME = "nc_ops"
 
 client = MongoClient(MONGO_URI)
