@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 from pymongo import MongoClient
-from datetime import date, timedelta, datetime
+from datetime import date, timedelta, datetime, timezone
 from bson.objectid import ObjectId
 import bcrypt
 
@@ -28,13 +28,6 @@ st.set_page_config("NC Operations System", layout="wide")
 # =====================================================
 LEAVE_TYPES = ["CL", "SL", "COURSE"]
 
-INDIAN_STATES = [
-    "Andhra Pradesh","Assam","Bihar","Chhattisgarh","Delhi","Goa","Gujarat",
-    "Haryana","Himachal Pradesh","Jharkhand","Karnataka","Kerala","Madhya Pradesh",
-    "Maharashtra","Odisha","Punjab","Rajasthan","Tamil Nadu","Telangana",
-    "Uttar Pradesh","Uttarakhand","West Bengal","Other"
-]
-
 MEETING_SCOPE = ["Pan India", "State-wise", "With DCs", "With NCs"]
 
 today = date.today()
@@ -47,7 +40,7 @@ if "user" not in st.session_state:
     st.session_state.user = None
 
 # =====================================================
-# LOGIN (NO BOOTSTRAP)
+# LOGIN
 # =====================================================
 if not st.session_state.user:
     st.title("🔐 Login")
@@ -79,7 +72,7 @@ if not st.session_state.user:
                                 p1.encode(), bcrypt.gensalt()
                             ),
                             "first_login": False,
-                            "updated_at": datetime.utcnow()
+                            "updated_at": datetime.now(timezone.utc)
                         }}
                     )
                     st.success("Password created. Please login again.")
@@ -89,16 +82,13 @@ if not st.session_state.user:
         else:
             password = st.text_input("Password", type="password")
             if st.button("Login"):
-                if bcrypt.checkpw(
-                    password.encode(),
-                    user_doc["password_hash"]
-                ):
+                if bcrypt.checkpw(password.encode(), user_doc["password_hash"]):
                     st.session_state.user = {
                         "email": user_doc["email"],
                         "name": user_doc["name"],
                         "role": user_doc["role"]
                     }
-                    st.experimental_rerun()
+                    st.rerun()
                 else:
                     st.error("Invalid password")
 
@@ -157,10 +147,7 @@ elif menu == "Tasks":
     start = st.date_input("Start Date *")
     end = st.date_input("End Date *")
 
-    if is_nc:
-        assigned_to = st.text_input("Assign To (Email) *")
-    else:
-        assigned_to = user["email"]
+    assigned_to = st.text_input("Assign To (Email) *") if is_nc else user["email"]
 
     if st.button("Create Task"):
         if not all([title.strip(), desc.strip(), start, end, assigned_to.strip()]):
@@ -173,7 +160,8 @@ elif menu == "Tasks":
                 "end_date": end,
                 "assigned_to": assigned_to,
                 "created_by": user["email"],
-                "status": "To Do"
+                "status": "To Do",
+                "created_at": datetime.now(timezone.utc)
             })
             st.success("Task created")
 
@@ -185,7 +173,7 @@ elif menu == "Tasks":
                 st.write(f"{t['start_date']} → {t['end_date']}")
 
 # =====================================================
-# DAILY LOGS (MANDATORY)
+# DAILY LOGS
 # =====================================================
 elif menu == "Daily Logs":
     st.title("🗓️ Daily Work Log (Mandatory)")
@@ -209,7 +197,8 @@ elif menu == "Daily Logs":
                 "user": user["email"],
                 "date": log_date,
                 "task_id": None,
-                "description": "No work done – On Leave"
+                "description": "No work done – On Leave",
+                "updated_at": datetime.now(timezone.utc)
             }},
             upsert=True
         )
@@ -226,7 +215,8 @@ elif menu == "Daily Logs":
                     "user": user["email"],
                     "date": log_date,
                     "task_id": None,
-                    "description": reason
+                    "description": reason,
+                    "created_at": datetime.now(timezone.utc)
                 })
                 st.success("Log saved")
         st.stop()
@@ -245,7 +235,8 @@ elif menu == "Daily Logs":
                     "user": user["email"],
                     "date": log_date,
                     "task_id": task_map[task],
-                    "description": desc
+                    "description": desc,
+                    "updated_at": datetime.now(timezone.utc)
                 }},
                 upsert=True
             )
@@ -269,7 +260,8 @@ elif menu == "Leave":
                     "type": ltype,
                     "date": ldate,
                     "reason": reason,
-                    "status": "Pending"
+                    "status": "Pending",
+                    "created_at": datetime.now(timezone.utc)
                 })
                 st.success("Leave applied")
 
@@ -281,7 +273,10 @@ elif menu == "Leave":
                 if st.button("Approve", key=str(l["_id"])):
                     leave_col.update_one(
                         {"_id": l["_id"]},
-                        {"$set": {"status": "Approved"}}
+                        {"$set": {
+                            "status": "Approved",
+                            "approved_at": datetime.now(timezone.utc)
+                        }}
                     )
                     st.success("Approved")
 
@@ -290,4 +285,4 @@ elif menu == "Leave":
 # =====================================================
 elif menu == "Logout":
     st.session_state.user = None
-    st.experimental_rerun()
+    st.rerun()
