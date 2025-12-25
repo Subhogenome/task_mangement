@@ -14,7 +14,7 @@ def within_7_days(d):
     return d >= to_utc(date.today() - timedelta(days=6))
 
 # ================= CONFIG =================
-MONGO_URI = st.secrets["mongo"]["uri"]
+MONGO_URI = st.secrets["mongo"]
 client = MongoClient(MONGO_URI)
 db = client["nc_ops"]
 
