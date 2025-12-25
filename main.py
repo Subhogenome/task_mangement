@@ -10,7 +10,7 @@ import bcrypt
 # =====================================================
 st.set_page_config("NC Ops System", layout="wide")
 
-MONGO_URI = st.secrets["mongo"]
+MONGO_URI = st.secrets["mongo"]["uri"]
 client = MongoClient(MONGO_URI)
 db = client.nc_ops
 
@@ -21,7 +21,7 @@ leave_col = db.leave_requests
 audit_col = db.audit_logs
 
 # =====================================================
-# INDEXES (SAFE)
+# INDEXES
 # =====================================================
 users_col.create_index("email", unique=True)
 tasks_col.create_index("assigned_to")
@@ -34,7 +34,6 @@ audit_col.create_index("timestamp")
 # CONSTANTS
 # =====================================================
 SESSION_TIMEOUT_MIN = 45
-TASK_STATUS = ["To Do", "Running", "Blocked", "Completed", "Cancelled"]
 UPDATE_TYPES = ["Call", "Meeting", "Work"]
 LEAVE_LIMITS = {"CL": 15, "SL": 7}
 
@@ -47,12 +46,20 @@ def utc_now():
 def to_utc(d):
     return datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
 
-def audit(actor, action, entity, entity_id, before=None, after=None):
+def mongo_docs_to_df(docs):
+    if not docs:
+        return pd.DataFrame()
+    df = pd.DataFrame(docs)
+    if "_id" in df.columns:
+        df["_id"] = df["_id"].astype(str)
+    return df
+
+def audit(actor, action, entity, entity_id=None, before=None, after=None):
     audit_col.insert_one({
         "actor": actor,
         "action": action,
         "entity": entity,
-        "entity_id": entity_id,
+        "entity_id": str(entity_id) if entity_id else None,
         "before": before,
         "after": after,
         "timestamp": utc_now()
@@ -60,7 +67,7 @@ def audit(actor, action, entity, entity_id, before=None, after=None):
 
 def enforce_role(user, roles):
     if user["role"] not in roles:
-        st.error("Unauthorized")
+        st.error("Unauthorized action")
         st.stop()
 
 def session_valid(user):
@@ -145,15 +152,16 @@ menu = st.sidebar.radio(
 # =====================================================
 if menu == "Dashboard":
     st.title("📡 Live Updates")
-    df = pd.DataFrame(list(updates_col.find().sort("created_at", -1).limit(50)))
+    df = mongo_docs_to_df(
+        list(updates_col.find().sort("created_at", -1).limit(50))
+    )
     if not df.empty:
-        df["task"] = df["task_id"].astype(str)
-        st.dataframe(df[["user", "update_type", "task", "created_at"]])
+        st.dataframe(df.drop(columns=["_id"], errors="ignore"))
     else:
         st.info("No updates yet")
 
 # =====================================================
-# TASKS + SUBTASKS
+# TASKS
 # =====================================================
 elif menu == "Tasks":
     st.title("📝 Tasks & Subtasks")
@@ -162,7 +170,7 @@ elif menu == "Tasks":
     parents = list(tasks_col.find({"parent_task_id": None}))
     parent_map = {"None": None, **{p["title"]: p["_id"] for p in parents}}
 
-    parent = st.selectbox("Parent Task (optional)", parent_map.keys())
+    parent = st.selectbox("Parent Task", parent_map.keys())
     title = st.text_input("Title")
     desc = st.text_area("Description")
     assigned = user["email"] if not is_nc else st.text_input("Assign To")
@@ -181,10 +189,11 @@ elif menu == "Tasks":
         audit(user["email"], "CREATE_TASK", "task", res.inserted_id, after=task)
         st.success("Task created")
 
-    st.subheader("My Tasks")
-    df = pd.DataFrame(list(tasks_col.find({"assigned_to": user["email"]})))
+    df = mongo_docs_to_df(
+        list(tasks_col.find({"assigned_to": user["email"]}))
+    )
     if not df.empty:
-        st.dataframe(df[["title", "status", "parent_task_id"]])
+        st.dataframe(df.drop(columns=["_id"], errors="ignore"))
 
 # =====================================================
 # DAILY UPDATE
@@ -213,7 +222,7 @@ elif menu == "Daily Update":
             "task_id": task_map[task],
             "date": today_utc
         }):
-            st.error("Already updated today")
+            st.error("Update already logged today")
             st.stop()
 
         update = {
@@ -243,9 +252,15 @@ elif menu == "Daily Update":
 elif menu == "Leave":
     st.title("🌴 Leave Management")
 
-    used = pd.DataFrame(list(
+    approved = list(
         leave_col.find({"user": user["email"], "status": "Approved"})
-    ))["type"].value_counts().to_dict() if leave_col.count_documents({"user": user["email"]}) else {}
+    )
+
+    used = {}
+    for l in approved:
+        lt = l.get("type")
+        if lt:
+            used[lt] = used.get(lt, 0) + l.get("days", 1)
 
     for lt, limit in LEAVE_LIMITS.items():
         st.write(f"{lt}: {limit - used.get(lt, 0)} remaining")
@@ -257,25 +272,23 @@ elif menu == "Leave":
         reason = st.text_area("Reason")
 
         if st.button("Apply"):
-            days = (t - f).days + 1
             leave = {
                 "user": user["email"],
                 "from": to_utc(f),
                 "to": to_utc(t),
-                "days": days,
+                "days": (t - f).days + 1,
                 "type": ltype,
                 "reason": reason,
                 "status": "Pending"
             }
             leave_col.insert_one(leave)
-            audit(user["email"], "APPLY_LEAVE", "leave", None, after=leave)
+            audit(user["email"], "APPLY_LEAVE", "leave", after=leave)
             st.success("Leave applied")
 
     if is_nc:
-        st.subheader("Pending Requests")
         for l in leave_col.find({"status": "Pending"}):
             with st.expander(l["user"]):
-                rej = st.text_input("Rejection Reason", key=str(l["_id"]))
+                rej = st.text_input("Rejection reason", key=str(l["_id"]))
                 c1, c2 = st.columns(2)
                 if c1.button("Approve", key="a"+str(l["_id"])):
                     leave_col.update_one(
@@ -285,7 +298,7 @@ elif menu == "Leave":
                     audit(user["email"], "APPROVE_LEAVE", "leave", l["_id"])
                 if c2.button("Reject", key="r"+str(l["_id"])):
                     if not rej:
-                        st.error("Rejection reason required")
+                        st.error("Reason required")
                         st.stop()
                     leave_col.update_one(
                         {"_id": l["_id"]},
