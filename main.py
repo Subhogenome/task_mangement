@@ -1,44 +1,78 @@
 import streamlit as st
 import pandas as pd
 from pymongo import MongoClient
-from datetime import date, timedelta, datetime, timezone
-from bson.objectid import ObjectId
+from datetime import datetime, date, timedelta, timezone
+from bson import ObjectId
 import bcrypt
 
 # =====================================================
-# HELPERS
+# APP CONFIG
 # =====================================================
-def to_utc(d):
-    return datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
+st.set_page_config("NC Ops System", layout="wide")
 
-def within_7_days(d):
-    return d >= to_utc(date.today() - timedelta(days=6))
-
-# =====================================================
-# CONFIG
-# =====================================================
 MONGO_URI = st.secrets["mongo"]
 client = MongoClient(MONGO_URI)
-db = client["nc_ops"]
+db = client.nc_ops
 
 users_col = db.users
 tasks_col = db.tasks
 updates_col = db.task_updates
 leave_col = db.leave_requests
+audit_col = db.audit_logs
 
-st.set_page_config("NC Task Management System", layout="wide")
+# =====================================================
+# INDEXES (SAFE)
+# =====================================================
+users_col.create_index("email", unique=True)
+tasks_col.create_index("assigned_to")
+tasks_col.create_index("parent_task_id")
+updates_col.create_index([("task_id", 1), ("date", 1)])
+leave_col.create_index("user")
+audit_col.create_index("timestamp")
 
 # =====================================================
 # CONSTANTS
 # =====================================================
-UPDATE_TYPES = ["Call", "Meeting", "Documentation", "Coordination", "Other"]
-CALL_TYPES = ["SC", "DC", "Lead", "Other"]
-MEETING_TYPES = ["Pan India", "State", "DCs", "NCs"]
+SESSION_TIMEOUT_MIN = 45
+TASK_STATUS = ["To Do", "Running", "Blocked", "Completed", "Cancelled"]
+UPDATE_TYPES = ["Call", "Meeting", "Work"]
+LEAVE_LIMITS = {"CL": 15, "SL": 7}
 
-LEAVE_LIMITS = {"CL": 15, "SL": 7, "COURSE": 7}
+# =====================================================
+# HELPERS
+# =====================================================
+def utc_now():
+    return datetime.now(timezone.utc)
 
-today = date.today()
-editable_from = today - timedelta(days=6)
+def to_utc(d):
+    return datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
+
+def audit(actor, action, entity, entity_id, before=None, after=None):
+    audit_col.insert_one({
+        "actor": actor,
+        "action": action,
+        "entity": entity,
+        "entity_id": entity_id,
+        "before": before,
+        "after": after,
+        "timestamp": utc_now()
+    })
+
+def enforce_role(user, roles):
+    if user["role"] not in roles:
+        st.error("Unauthorized")
+        st.stop()
+
+def session_valid(user):
+    return utc_now() - user["last_active"] < timedelta(minutes=SESSION_TIMEOUT_MIN)
+
+def update_parent_status(parent_id):
+    children = list(tasks_col.find({"parent_task_id": parent_id}))
+    if children and all(c["status"] == "Completed" for c in children):
+        tasks_col.update_one(
+            {"_id": parent_id},
+            {"$set": {"status": "Completed", "completed_at": utc_now()}}
+        )
 
 # =====================================================
 # SESSION
@@ -52,7 +86,7 @@ if "user" not in st.session_state:
 if not st.session_state.user:
     st.title("🔐 Login")
 
-    email = st.text_input("Email")
+    email = st.text_input("Email").strip().lower()
     user = users_col.find_one({"email": email, "active": True})
 
     if email and not user:
@@ -60,7 +94,7 @@ if not st.session_state.user:
         st.stop()
 
     if user:
-        if user["first_login"]:
+        if user.get("first_login", True):
             p1 = st.text_input("Create Password", type="password")
             p2 = st.text_input("Confirm Password", type="password")
             if st.button("Set Password") and p1 == p2:
@@ -71,12 +105,18 @@ if not st.session_state.user:
                         "first_login": False
                     }}
                 )
+                audit(email, "SET_PASSWORD", "user", user["_id"])
                 st.success("Password set. Login again.")
                 st.stop()
         else:
             pwd = st.text_input("Password", type="password")
             if st.button("Login"):
                 if bcrypt.checkpw(pwd.encode(), user["password_hash"]):
+                    users_col.update_one(
+                        {"_id": user["_id"]},
+                        {"$set": {"last_active": utc_now()}}
+                    )
+                    user["last_active"] = utc_now()
                     st.session_state.user = user
                     st.rerun()
                 else:
@@ -87,172 +127,192 @@ if not st.session_state.user:
 # CONTEXT
 # =====================================================
 user = st.session_state.user
+if not session_valid(user):
+    st.session_state.user = None
+    st.warning("Session expired")
+    st.stop()
+
+users_col.update_one({"_id": user["_id"]}, {"$set": {"last_active": utc_now()}})
 is_nc = user["role"] == "nc"
 
 menu = st.sidebar.radio(
     "Navigation",
-    ["Dashboard", "Tasks", "Daily Update", "Leave", "Logout"]
+    ["Dashboard", "Tasks", "Daily Update", "Leave", "Performance", "Logout"]
 )
 
 # =====================================================
-# DASHBOARD (REAL-TIME)
+# DASHBOARD
 # =====================================================
 if menu == "Dashboard":
-    st.title("📡 Live Task Updates")
-
-    logs = list(updates_col.find().sort("created_at", -1).limit(100))
-    if not logs:
-        st.info("No updates yet")
-    else:
-        df = pd.DataFrame(logs)
+    st.title("📡 Live Updates")
+    df = pd.DataFrame(list(updates_col.find().sort("created_at", -1).limit(50)))
+    if not df.empty:
         df["task"] = df["task_id"].astype(str)
-        st.dataframe(df[["user", "update_type", "task", "detail", "created_at"]])
+        st.dataframe(df[["user", "update_type", "task", "created_at"]])
+    else:
+        st.info("No updates yet")
 
 # =====================================================
-# TASKS (TASK + SUBTASK)
+# TASKS + SUBTASKS
 # =====================================================
 elif menu == "Tasks":
-    st.title("📝 Task & Subtask Management")
+    st.title("📝 Tasks & Subtasks")
+    enforce_role(user, ["nc", "management"])
 
-    all_tasks = list(tasks_col.find())
-    parent_map = {t["title"]: t["_id"] for t in all_tasks if t.get("parent_task_id") is None}
+    parents = list(tasks_col.find({"parent_task_id": None}))
+    parent_map = {"None": None, **{p["title"]: p["_id"] for p in parents}}
 
-    parent = st.selectbox("Parent Task (optional)", ["None"] + list(parent_map.keys()))
-    title = st.text_input("Task Title *")
-    desc = st.text_area("Description *")
-    start = st.date_input("Start Date")
-    end = st.date_input("End Date")
-
-    # 🔑 KEY REQUIREMENT MET HERE
-    assigned = user["email"] if not is_nc else st.text_input("Assign To (Email)")
-    reportees = st.multiselect(
-        "Reporting NC(s)",
-        [u["email"] for u in users_col.find({"role": "nc"})]
-    )
+    parent = st.selectbox("Parent Task (optional)", parent_map.keys())
+    title = st.text_input("Title")
+    desc = st.text_area("Description")
+    assigned = user["email"] if not is_nc else st.text_input("Assign To")
 
     if st.button("Create Task"):
-        tasks_col.insert_one({
+        task = {
             "title": title,
             "description": desc,
-            "parent_task_id": None if parent == "None" else parent_map[parent],
             "assigned_to": assigned,
-            "reporting_ncs": reportees,
+            "parent_task_id": parent_map[parent],
             "status": "To Do",
-            "start_date": to_utc(start),
-            "end_date": to_utc(end),
             "created_by": user["email"],
-            "created_at": datetime.now(timezone.utc)
-        })
+            "created_at": utc_now()
+        }
+        res = tasks_col.insert_one(task)
+        audit(user["email"], "CREATE_TASK", "task", res.inserted_id, after=task)
         st.success("Task created")
 
-    st.subheader("📋 Existing Tasks")
-    st.dataframe(pd.DataFrame(all_tasks))
+    st.subheader("My Tasks")
+    df = pd.DataFrame(list(tasks_col.find({"assigned_to": user["email"]})))
+    if not df.empty:
+        st.dataframe(df[["title", "status", "parent_task_id"]])
 
 # =====================================================
-# DAILY UPDATE (STRUCTURED, EXPLICIT)
+# DAILY UPDATE
 # =====================================================
 elif menu == "Daily Update":
-    st.title("📅 Daily Task Update")
+    st.title("📅 Daily Update")
 
-    if leave_col.find_one({"user": user["email"], "date": to_utc(today), "status": "Approved"}):
-        st.error("You are on approved leave today")
+    my_tasks = list(tasks_col.find({
+        "assigned_to": user["email"],
+        "status": {"$ne": "Completed"}
+    }))
+
+    if not my_tasks:
+        st.info("No active tasks")
         st.stop()
 
-    my_tasks = list(tasks_col.find({"assigned_to": user["email"]}))
     task_map = {t["title"]: t["_id"] for t in my_tasks}
-
-    task = st.selectbox("Task / Subtask *", task_map.keys())
-    update_type = st.selectbox("Update Type *", UPDATE_TYPES)
-
-    detail = {}
-
-    if update_type == "Call":
-        detail["call_type"] = st.selectbox("Call With", CALL_TYPES)
-        detail["summary"] = st.text_area("Call Summary *")
-
-    elif update_type == "Meeting":
-        detail["meeting_type"] = st.selectbox("Meeting Type", MEETING_TYPES)
-        detail["mom"] = st.text_area("MOM *")
-
-    else:
-        detail["description"] = st.text_area("Work Description *")
+    task = st.selectbox("Task", task_map.keys())
+    update_type = st.selectbox("Update Type", UPDATE_TYPES)
+    detail = st.text_area("Details")
 
     if st.button("Submit Update"):
-        updates_col.insert_one({
+        today_utc = to_utc(date.today())
+        if updates_col.find_one({
+            "user": user["email"],
+            "task_id": task_map[task],
+            "date": today_utc
+        }):
+            st.error("Already updated today")
+            st.stop()
+
+        update = {
             "user": user["email"],
             "task_id": task_map[task],
             "update_type": update_type,
             "detail": detail,
-            "date": to_utc(today),
-            "created_at": datetime.now(timezone.utc)
-        })
+            "date": today_utc,
+            "created_at": utc_now()
+        }
+        updates_col.insert_one(update)
         tasks_col.update_one(
             {"_id": task_map[task]},
             {"$set": {"status": "Running"}}
         )
+
+        t = tasks_col.find_one({"_id": task_map[task]})
+        if t.get("parent_task_id"):
+            update_parent_status(t["parent_task_id"])
+
+        audit(user["email"], "LOG_UPDATE", "task", task_map[task], after=update)
         st.success("Update logged")
 
-    st.subheader("✏️ Edit / Delete (Last 7 Days)")
-    logs = list(updates_col.find({"user": user["email"], "date": {"$gte": to_utc(editable_from)}}))
-
-    for l in logs:
-        with st.expander(str(l["_id"])):
-            st.json(l)
-            if st.button("Delete", key=str(l["_id"])):
-                updates_col.delete_one({"_id": l["_id"]})
-                st.success("Deleted")
-                st.rerun()
-
 # =====================================================
-# LEAVE (BALANCE + APPROVAL)
+# LEAVE
 # =====================================================
 elif menu == "Leave":
     st.title("🌴 Leave Management")
 
-    # ---- BALANCE ----
-    used = pd.DataFrame(
-        list(leave_col.find({"user": user["email"], "status": "Approved"}))
-    )["type"].value_counts().to_dict() if leave_col.count_documents({"user": user["email"]}) else {}
+    used = pd.DataFrame(list(
+        leave_col.find({"user": user["email"], "status": "Approved"})
+    ))["type"].value_counts().to_dict() if leave_col.count_documents({"user": user["email"]}) else {}
 
-    st.subheader("Your Leave Balance")
     for lt, limit in LEAVE_LIMITS.items():
         st.write(f"{lt}: {limit - used.get(lt, 0)} remaining")
 
-    # ---- APPLY ----
     if not is_nc:
-        d = st.date_input("Leave Date")
-        ltype = st.selectbox("Leave Type", list(LEAVE_LIMITS.keys()))
+        f = st.date_input("From")
+        t = st.date_input("To")
+        ltype = st.selectbox("Type", list(LEAVE_LIMITS))
         reason = st.text_area("Reason")
 
-        if st.button("Apply Leave"):
-            leave_col.insert_one({
+        if st.button("Apply"):
+            days = (t - f).days + 1
+            leave = {
                 "user": user["email"],
+                "from": to_utc(f),
+                "to": to_utc(t),
+                "days": days,
                 "type": ltype,
-                "date": to_utc(d),
                 "reason": reason,
                 "status": "Pending"
-            })
+            }
+            leave_col.insert_one(leave)
+            audit(user["email"], "APPLY_LEAVE", "leave", None, after=leave)
             st.success("Leave applied")
 
-    # ---- APPROVE / REJECT ----
     if is_nc:
-        st.subheader("Pending Leave Requests")
+        st.subheader("Pending Requests")
         for l in leave_col.find({"status": "Pending"}):
             with st.expander(l["user"]):
-                st.write(l)
-                col1, col2 = st.columns(2)
-                if col1.button("Approve", key=str(l["_id"])):
+                rej = st.text_input("Rejection Reason", key=str(l["_id"]))
+                c1, c2 = st.columns(2)
+                if c1.button("Approve", key="a"+str(l["_id"])):
                     leave_col.update_one(
                         {"_id": l["_id"]},
                         {"$set": {"status": "Approved", "approved_by": user["email"]}}
                     )
-                    st.success("Approved")
-                if col2.button("Reject", key="rej"+str(l["_id"])):
+                    audit(user["email"], "APPROVE_LEAVE", "leave", l["_id"])
+                if c2.button("Reject", key="r"+str(l["_id"])):
+                    if not rej:
+                        st.error("Rejection reason required")
+                        st.stop()
                     leave_col.update_one(
                         {"_id": l["_id"]},
-                        {"$set": {"status": "Rejected", "approved_by": user["email"]}}
+                        {"$set": {
+                            "status": "Rejected",
+                            "approved_by": user["email"],
+                            "rejection_reason": rej
+                        }}
                     )
-                    st.warning("Rejected")
+                    audit(user["email"], "REJECT_LEAVE", "leave", l["_id"])
+
+# =====================================================
+# PERFORMANCE
+# =====================================================
+elif menu == "Performance":
+    st.title("📊 Performance")
+    st.metric(
+        "Tasks Completed",
+        tasks_col.count_documents({
+            "assigned_to": user["email"],
+            "status": "Completed"
+        })
+    )
+    st.metric(
+        "Total Updates",
+        updates_col.count_documents({"user": user["email"]})
+    )
 
 # =====================================================
 # LOGOUT
