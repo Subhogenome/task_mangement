@@ -23,7 +23,7 @@ LEAVE_LIMITS = {"CL": 15, "SL": 7, "Course": 7}
 # =====================================================
 # DB
 # =====================================================
-client = MongoClient(st.secrets["mongo_uri"])
+client = MongoClient(st.secrets["mongo"])
 db = client["task_system"]
 
 users = db.users
