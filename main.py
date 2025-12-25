@@ -10,7 +10,7 @@ import bcrypt
 # =====================================================
 st.set_page_config("NC Ops System", layout="wide")
 
-MONGO_URI = st.secrets["mongo"]
+MONGO_URI = st.secrets["mongo"]["uri"]
 client = MongoClient(MONGO_URI)
 db = client.nc_ops
 
@@ -21,7 +21,7 @@ leave_col = db.leave_requests
 audit_col = db.audit_logs
 
 # =====================================================
-# INDEXES
+# INDEXES (SAFE TO RUN MULTIPLE TIMES)
 # =====================================================
 users_col.create_index("email", unique=True)
 tasks_col.create_index("assigned_to")
@@ -67,11 +67,23 @@ def audit(actor, action, entity, entity_id=None, before=None, after=None):
 
 def enforce_role(user, roles):
     if user["role"] not in roles:
-        st.error("Unauthorized action")
+        st.error("Unauthorized")
         st.stop()
 
 def session_valid(user):
-    return utc_now() - user["last_active"] < timedelta(minutes=SESSION_TIMEOUT_MIN)
+    last_active = user.get("last_active")
+
+    # Legacy / first-time users
+    if not last_active:
+        now = utc_now()
+        users_col.update_one(
+            {"_id": user["_id"]},
+            {"$set": {"last_active": now}}
+        )
+        user["last_active"] = now
+        return True
+
+    return utc_now() - last_active < timedelta(minutes=SESSION_TIMEOUT_MIN)
 
 def update_parent_status(parent_id):
     children = list(tasks_col.find({"parent_task_id": parent_id}))
@@ -109,7 +121,8 @@ if not st.session_state.user:
                     {"_id": user["_id"]},
                     {"$set": {
                         "password_hash": bcrypt.hashpw(p1.encode(), bcrypt.gensalt()),
-                        "first_login": False
+                        "first_login": False,
+                        "last_active": utc_now()
                     }}
                 )
                 audit(email, "SET_PASSWORD", "user", user["_id"])
@@ -119,11 +132,12 @@ if not st.session_state.user:
             pwd = st.text_input("Password", type="password")
             if st.button("Login"):
                 if bcrypt.checkpw(pwd.encode(), user["password_hash"]):
+                    now = utc_now()
                     users_col.update_one(
                         {"_id": user["_id"]},
-                        {"$set": {"last_active": utc_now()}}
+                        {"$set": {"last_active": now}}
                     )
-                    user["last_active"] = utc_now()
+                    user["last_active"] = now
                     st.session_state.user = user
                     st.rerun()
                 else:
@@ -139,7 +153,11 @@ if not session_valid(user):
     st.warning("Session expired")
     st.stop()
 
-users_col.update_one({"_id": user["_id"]}, {"$set": {"last_active": utc_now()}})
+users_col.update_one(
+    {"_id": user["_id"]},
+    {"$set": {"last_active": utc_now()}}
+)
+
 is_nc = user["role"] == "nc"
 
 menu = st.sidebar.radio(
@@ -161,7 +179,7 @@ if menu == "Dashboard":
         st.info("No updates yet")
 
 # =====================================================
-# TASKS
+# TASKS & SUBTASKS
 # =====================================================
 elif menu == "Tasks":
     st.title("📝 Tasks & Subtasks")
@@ -234,6 +252,7 @@ elif menu == "Daily Update":
             "created_at": utc_now()
         }
         updates_col.insert_one(update)
+
         tasks_col.update_one(
             {"_id": task_map[task]},
             {"$set": {"status": "Running"}}
