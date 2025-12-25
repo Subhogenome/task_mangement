@@ -10,7 +10,7 @@ import bcrypt
 # =====================================================
 st.set_page_config("NC Ops System", layout="wide")
 
-MONGO_URI = st.secrets["mongo"]["uri"]
+MONGO_URI = st.secrets["mongo"]
 client = MongoClient(MONGO_URI)
 db = client.nc_ops
 
