@@ -3,7 +3,7 @@ import pandas as pd
 from datetime import date
 
 # =====================================================
-# HARD-CODED USERS (POC)
+# USERS (POC – HARD CODED)
 # =====================================================
 NCS = ["Kunal", "Subhodeep", "Rishabh"]
 MANAGEMENT = ["Akshay", "Vatsal", "Narendra"]
@@ -23,7 +23,7 @@ TASK_STATUS = ["To Do", "Running", "Done"]
 LEAVE_TYPES = {"CL": 15, "SL": 7, "COURSE": 7}
 
 # =====================================================
-# SESSION STATE (IN-MEMORY DB)
+# SESSION STATE (IN-MEMORY DATABASE)
 # =====================================================
 if "tasks" not in st.session_state:
     st.session_state.tasks = []
@@ -35,13 +35,13 @@ if "leaves" not in st.session_state:
     st.session_state.leaves = []
 
 # =====================================================
-# APP HEADER
+# APP CONFIG
 # =====================================================
 st.set_page_config("Task & Leave Management POC", layout="wide")
 st.title("🧩 Task, Work Log & Leave Management – POC")
 
 # =====================================================
-# ROLE SELECTION
+# ROLE SELECTION (NO AUTH)
 # =====================================================
 st.sidebar.header("Select Role")
 role = st.sidebar.selectbox("Role", ["NC", "Management"])
@@ -66,10 +66,16 @@ if menu == "Dashboard":
 
     if role == "NC":
         st.subheader("📋 All Tasks")
-        st.dataframe(pd.DataFrame(st.session_state.tasks)) if st.session_state.tasks else st.info("No tasks")
+        if st.session_state.tasks:
+            st.dataframe(pd.DataFrame(st.session_state.tasks))
+        else:
+            st.info("No tasks created yet")
 
         st.subheader("📌 Live Work Updates")
-        st.dataframe(pd.DataFrame(st.session_state.logs)) if st.session_state.logs else st.info("No logs")
+        if st.session_state.logs:
+            st.dataframe(pd.DataFrame(st.session_state.logs))
+        else:
+            st.info("No activity logged yet")
 
         st.subheader("🌴 Who is on Leave Today")
         today = str(date.today())
@@ -77,22 +83,30 @@ if menu == "Dashboard":
             l for l in st.session_state.leaves
             if l["date"] == today and l["status"] == "Approved"
         ]
-        st.dataframe(pd.DataFrame(on_leave)) if on_leave else st.info("No one on leave today")
+        if on_leave:
+            st.dataframe(pd.DataFrame(on_leave))
+        else:
+            st.info("No one on leave today")
 
     else:
         st.subheader("📋 My Tasks")
         my_tasks = [t for t in st.session_state.tasks if t["assigned_to"] == user]
-        st.dataframe(pd.DataFrame(my_tasks)) if my_tasks else st.info("No tasks")
+        if my_tasks:
+            st.dataframe(pd.DataFrame(my_tasks))
+        else:
+            st.info("No tasks assigned to you")
 
         st.subheader("🌴 My Leave Balance")
-        used = pd.DataFrame(
-            [l for l in st.session_state.leaves if l["user"] == user and l["status"] == "Approved"]
-        )["leave_type"].value_counts().to_dict() if st.session_state.leaves else {}
+        used = {}
+        for l in st.session_state.leaves:
+            if l["user"] == user and l["status"] == "Approved":
+                used[l["leave_type"]] = used.get(l["leave_type"], 0) + 1
 
         balance = {
-            k: v - used.get(k, 0)
-            for k, v in LEAVE_TYPES.items()
+            k: LEAVE_TYPES[k] - used.get(k, 0)
+            for k in LEAVE_TYPES
         }
+
         st.table(pd.DataFrame(balance.items(), columns=["Leave Type", "Remaining"]))
 
 # =====================================================
@@ -118,17 +132,20 @@ elif menu == "Create Task":
         reporting_ncs = st.multiselect("Reporting NC(s)", NCS)
 
     if st.button("Create Task"):
-        st.session_state.tasks.append({
-            "task_id": len(st.session_state.tasks) + 1,
-            "title": title,
-            "description": desc,
-            "assigned_to": assigned_to,
-            "reporting_ncs": ", ".join(reporting_ncs),
-            "start_date": str(start_date),
-            "end_date": str(end_date),
-            "status": "To Do"
-        })
-        st.success("Task created")
+        if not title or not desc or not reporting_ncs:
+            st.error("All fields are mandatory")
+        else:
+            st.session_state.tasks.append({
+                "task_id": len(st.session_state.tasks) + 1,
+                "title": title,
+                "description": desc,
+                "assigned_to": assigned_to,
+                "reporting_ncs": ", ".join(reporting_ncs),
+                "start_date": str(start_date),
+                "end_date": str(end_date),
+                "status": "To Do"
+            })
+            st.success("Task created successfully")
 
 # =====================================================
 # DAILY WORK LOG
@@ -141,12 +158,12 @@ elif menu == "Daily Work Log":
         st.stop()
 
     today = str(date.today())
-    if any(
-        l for l in st.session_state.leaves
-        if l["user"] == user and l["date"] == today and l["status"] == "Approved"
-    ):
-        st.error("You are on approved leave today")
-        st.stop()
+
+    # Block logging if on leave
+    for l in st.session_state.leaves:
+        if l["user"] == user and l["date"] == today and l["status"] == "Approved":
+            st.error("You are on approved leave today")
+            st.stop()
 
     my_tasks = [t for t in st.session_state.tasks if t["assigned_to"] == user]
     if not my_tasks:
@@ -156,34 +173,50 @@ elif menu == "Daily Work Log":
     task_titles = {t["title"]: t for t in my_tasks}
     selected_task = st.selectbox("Task", task_titles.keys())
 
-    activity_type = st.selectbox("Activity Type", ["Task Work", "Call", "Meeting", "Other"])
+    st.info(
+        f"🗓️ Task Timeline: {task_titles[selected_task]['start_date']} → "
+        f"{task_titles[selected_task]['end_date']}"
+    )
 
-    log = {"date": today, "user": user, "task": selected_task, "activity_type": activity_type}
+    activity_type = st.selectbox(
+        "Activity Type",
+        ["Task Work", "Call", "Meeting", "Other"]
+    )
+
+    log = {
+        "date": today,
+        "user": user,
+        "task": selected_task,
+        "activity_type": activity_type
+    }
 
     if activity_type == "Task Work":
         status = st.selectbox("Task Status", TASK_STATUS)
-        log["details"] = st.text_area("Work Done")
+        log["details"] = st.text_area("Work Done *")
         task_titles[selected_task]["status"] = status
 
     elif activity_type == "Call":
         log["call_with"] = st.selectbox("Call With", CALL_WITH)
         log["state"] = st.text_input("State")
-        log["details"] = st.text_area("Call Notes")
+        log["details"] = st.text_area("Call Notes *")
 
     elif activity_type == "Meeting":
         log["meeting_with"] = st.selectbox("Meeting With", MEETING_WITH)
         log["mode"] = st.selectbox("Mode", ["Online", "Offline"])
         log["state"] = st.text_input("State")
-        log["details"] = st.text_area("MOM")
+        log["details"] = st.text_area("Minutes of Meeting (MOM) *")
 
     else:
         log["work_category"] = st.selectbox("Work Category", OTHER_WORK_TYPES)
         log["state"] = st.text_input("State")
-        log["details"] = st.text_area("Description")
+        log["details"] = st.text_area("Work Description *")
 
     if st.button("Submit Daily Log"):
-        st.session_state.logs.append(log)
-        st.success("Work logged")
+        if not log.get("details"):
+            st.error("Details are mandatory")
+        else:
+            st.session_state.logs.append(log)
+            st.success("Daily work logged successfully")
 
 # =====================================================
 # LEAVE MANAGEMENT
@@ -191,24 +224,22 @@ elif menu == "Daily Work Log":
 elif menu == "Leave":
     st.header("🌴 Leave Management")
 
-    today = str(date.today())
-
     if role == "Management":
         st.subheader("Apply for Leave")
 
-        leave_type = st.selectbox("Leave Type", LEAVE_TYPES.keys())
+        leave_type = st.selectbox("Leave Type", list(LEAVE_TYPES.keys()))
         leave_date = st.date_input("Leave Date", min_value=date.today())
-        reason = st.text_area("Reason")
+        reason = st.text_area("Reason *")
 
-        used = [
-            l for l in st.session_state.leaves
+        used = sum(
+            1 for l in st.session_state.leaves
             if l["user"] == user and l["leave_type"] == leave_type and l["status"] == "Approved"
-        ]
+        )
 
-        if len(used) >= LEAVE_TYPES[leave_type]:
+        if used >= LEAVE_TYPES[leave_type]:
             st.error("Leave balance exhausted")
 
-        elif st.button("Apply Leave"):
+        if st.button("Apply Leave"):
             st.session_state.leaves.append({
                 "user": user,
                 "leave_type": leave_type,
@@ -228,19 +259,22 @@ elif menu == "Leave":
         if not pending:
             st.info("No pending leave requests")
 
-        for i, l in enumerate(pending):
+        for idx, l in enumerate(pending):
             with st.expander(f"{l['user']} – {l['leave_type']} – {l['date']}"):
                 st.write("Reason:", l["reason"])
-                rej_reason = st.text_input("Rejection Reason (if rejecting)", key=i)
+                rej_reason = st.text_input(
+                    "Rejection Reason (if rejecting)",
+                    key=f"rej_{idx}"
+                )
 
                 col1, col2 = st.columns(2)
-                if col1.button("Approve", key=f"a{i}"):
+                if col1.button("Approve", key=f"app_{idx}"):
                     l["status"] = "Approved"
                     l["action_by"] = user
-                    st.success("Approved")
+                    st.success("Leave approved")
 
-                if col2.button("Reject", key=f"r{i}"):
+                if col2.button("Reject", key=f"rejbtn_{idx}"):
                     l["status"] = "Rejected"
                     l["action_by"] = user
                     l["action_reason"] = rej_reason
-                    st.warning("Rejected")
+                    st.warning("Leave rejected")
