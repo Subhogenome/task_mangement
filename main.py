@@ -22,19 +22,10 @@ leaves_col = db.leaves
 # =====================================================
 # EMAILS
 # =====================================================
-NC_EMAILS = {
-    "Rishabh Purohit": "purohitrm@gmail.com",
-    "Kunal Bhaiya": "kunaljgd@gmail.com",
-    "Subhodeep Chatterjee": "chatterjeesubhodeep08@gmail.com"
-}
+NC_EMAILS = dict(st.secrets["nc_emails"])
+MGMT_EMAILS = dict(st.secrets["mgmt_emails"])
 
-MGMT_EMAILS = {
-    "Akshay Kachchhi": "akshay@srisripublications.com",
-    "Vatsal Patel": "aolsm.rc1@srisripublications.com",
-    "Narendra Wamburkar": "aolsm.rc2@srisripublications.com"
-}
-
-OFFICIAL_NC_EMAIL = "aolsm.nc@srisripublications.com"
+OFFICIAL_NC_EMAIL =st.secrets["of_email"] 
 
 yag = yagmail.SMTP(
     st.secrets["user"],
