@@ -9,6 +9,15 @@ from langchain_groq import ChatGroq
 from langchain_core.prompts import PromptTemplate
 
 # =====================================================
+# HELPERS FOR NAME <-> KEY
+# =====================================================
+def key_to_name(key: str) -> str:
+    return key.replace("_", " ")
+
+def name_to_key(name: str) -> str:
+    return name.replace(" ", "_")
+
+# =====================================================
 # DB
 # =====================================================
 client = MongoClient(st.secrets["mongo"]["uri"])
@@ -22,8 +31,9 @@ leaves_col = db.leaves
 # =====================================================
 # EMAIL CONFIG
 # =====================================================
-NC_EMAILS = dict(st.secrets["nc_emails"])
-MGMT_EMAILS = dict(st.secrets["mgmt_emails"])
+NC_EMAILS = dict(st.secrets["nc_emails"])        # key -> email
+MGMT_EMAILS = dict(st.secrets["mgmt_emails"])    # key -> email
+
 OFFICIAL_NC_EMAIL = st.secrets["email"]["user"]
 
 yag = yagmail.SMTP(
@@ -49,11 +59,10 @@ You are a National Coordinator reviewing daily work.
 Summarize the work done today by {name}.
 
 Focus on:
-- Tasks
-- Calls
-- Meetings
+- Tasks worked on
+- Calls / meetings
 - Status changes
-- Risks or delays
+- Risks or follow-ups
 
 Logs:
 {logs}
@@ -131,6 +140,8 @@ user_email = current_user["email"]
 user_name = current_user["name"]
 role = current_user["role"]
 
+user_key = name_to_key(user_name)
+
 st.sidebar.markdown(
     f"**Logged in as**  \n{user_name}  \n({user_email})"
 )
@@ -152,11 +163,17 @@ if menu == "Dashboard":
     if role == "nc":
         st.subheader("📋 All Tasks")
         tasks = list(tasks_col.find({}, {"_id": 0}))
-        st.dataframe(pd.DataFrame(tasks)) if tasks else st.info("No tasks")
+        if tasks:
+            st.dataframe(pd.DataFrame(tasks))
+        else:
+            st.info("No tasks")
 
         st.subheader("📌 Daily Work Logs")
         logs = list(logs_col.find({}, {"_id": 0}))
-        st.dataframe(pd.DataFrame(logs)) if logs else st.info("No logs yet")
+        if logs:
+            st.dataframe(pd.DataFrame(logs))
+        else:
+            st.info("No logs yet")
 
         st.divider()
         st.subheader("🧠 AI Daily Summary")
@@ -169,8 +186,8 @@ if menu == "Dashboard":
 
             summaries = []
 
-            for key, email in MGMT_EMAILS.items():
-                name = key.replace("_", " ")
+            for k, email in MGMT_EMAILS.items():
+                name = key_to_name(k)
                 mlogs = df[df["user_email"] == email]
 
                 if not mlogs.empty:
@@ -194,7 +211,6 @@ if menu == "Dashboard":
                     body="\n\n".join(summaries),
                     cc=OFFICIAL_NC_EMAIL
                 )
-
                 st.success("Daily summaries emailed")
             else:
                 st.info("No logs to summarize")
@@ -205,7 +221,10 @@ if menu == "Dashboard":
             {"assigned_to_email": user_email},
             {"_id": 0}
         ))
-        st.dataframe(pd.DataFrame(my_tasks)) if my_tasks else st.info("No tasks assigned")
+        if my_tasks:
+            st.dataframe(pd.DataFrame(my_tasks))
+        else:
+            st.info("No tasks assigned")
 
 # =====================================================
 # CREATE TASK
@@ -221,12 +240,17 @@ elif menu == "Create Task":
     if role == "nc":
         assignee_key = st.selectbox("Assign To", list(MGMT_EMAILS.keys()))
         assigned_email = MGMT_EMAILS[assignee_key]
-        assigned_name = assignee_key.replace("_", " ")
-        reporters = list(NC_EMAILS.values())
+        assigned_name = key_to_name(assignee_key)
+
+        reporters = st.multiselect(
+            "Reporting NCs",
+            list(NC_EMAILS.keys()),
+            default=[user_key] if user_key in NC_EMAILS else []
+        )
     else:
         assigned_email = user_email
         assigned_name = user_name
-        reporters = list(NC_EMAILS.values())
+        reporters = list(NC_EMAILS.keys())
 
     if st.button("Create Task"):
         tasks_col.insert_one({
@@ -234,7 +258,8 @@ elif menu == "Create Task":
             "description": desc,
             "assigned_to_email": assigned_email,
             "assigned_to_name": assigned_name,
-            "reporting_nc_emails": reporters,
+            "reporting_nc_keys": reporters,
+            "reporting_nc_emails": [NC_EMAILS[k] for k in reporters],
             "start_date": str(start),
             "end_date": str(end),
             "status": "To Do",
@@ -245,7 +270,7 @@ elif menu == "Create Task":
             to=assigned_email,
             subject=f"[Task Assigned] {title}",
             body=f"{desc}\n\nStart: {start}\nEnd: {end}",
-            cc=reporters
+            cc=[NC_EMAILS[k] for k in reporters]
         )
 
         st.success("Task created & email sent")
@@ -258,6 +283,7 @@ elif menu == "Daily Work Log":
         st.stop()
 
     today = str(date.today())
+
     tasks = list(tasks_col.find({"assigned_to_email": user_email}))
     task_map = {t["title"]: t for t in tasks}
 
@@ -265,7 +291,7 @@ elif menu == "Daily Work Log":
         st.info("No tasks assigned")
         st.stop()
 
-    task_title = st.selectbox("Task", task_map.keys())
+    task_title = st.selectbox("Task", list(task_map.keys()))
     details = st.text_area("Work Done")
     new_status = st.selectbox("Update Status", ["No Change", "To Do", "Running", "Done"])
 
