@@ -20,7 +20,7 @@ def name_to_key(name: str) -> str:
 # =====================================================
 # DB
 # =====================================================
-client = MongoClient(st.secrets["mongo"]["uri"])
+client = MongoClient(st.secrets["mongo"])
 db = client["nc_ops"]
 
 users_col = db.users
@@ -34,11 +34,11 @@ leaves_col = db.leaves
 NC_EMAILS = dict(st.secrets["nc_emails"])        # key -> email
 MGMT_EMAILS = dict(st.secrets["mgmt_emails"])    # key -> email
 
-OFFICIAL_NC_EMAIL = st.secrets["email"]["user"]
+OFFICIAL_NC_EMAIL = st.secrets["of_email"]
 
 yag = yagmail.SMTP(
-    st.secrets["email"]["user"],
-    st.secrets["email"]["password"]
+    st.secrets["user"],
+    st.secrets["password"]
 )
 
 def send_email(to, subject, body, cc=None):
@@ -48,7 +48,7 @@ def send_email(to, subject, body, cc=None):
 # LLM (ChatGroq – LCEL)
 # =====================================================
 llm = ChatGroq(
-    api_key=st.secrets["groq"]["api_key"],
+    api_key=st.secrets["api_key"],
     model="llama3-70b-8192",
     temperature=0.2
 )
