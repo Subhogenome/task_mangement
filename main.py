@@ -138,7 +138,7 @@ elif menu == "Create Task":
             st.success("Task created")
 
 # =====================================================
-# DAILY WORK LOG (WITH STATUS CHANGE)
+# DAILY WORK LOG (CALL NAME INCLUDED)
 # =====================================================
 elif menu == "Daily Work Log":
     st.header("📅 Daily Work Log")
@@ -189,6 +189,7 @@ elif menu == "Daily Work Log":
         log["details"] = st.text_area("Work Done *")
 
     elif activity_type == "Call":
+        log["called_person_name"] = st.text_input("Person Called (Name) *")
         log["call_with"] = st.selectbox("Call With", CALL_WITH)
         log["state"] = st.text_input("State")
         log["details"] = st.text_area("Call Notes *")
@@ -197,7 +198,7 @@ elif menu == "Daily Work Log":
         log["meeting_with"] = st.selectbox("Meeting With", MEETING_WITH)
         log["mode"] = st.selectbox("Mode", ["Online", "Offline"])
         log["state"] = st.text_input("State")
-        log["details"] = st.text_area("MOM *")
+        log["details"] = st.text_area("Minutes of Meeting (MOM) *")
 
     else:
         log["work_category"] = st.selectbox("Work Category", OTHER_WORK_TYPES)
@@ -205,8 +206,10 @@ elif menu == "Daily Work Log":
         log["details"] = st.text_area("Work Description *")
 
     if st.button("Submit Daily Log"):
-        if not log.get("details"):
-            st.error("Details are mandatory")
+        if not log.get("details") or (
+            activity_type == "Call" and not log.get("called_person_name")
+        ):
+            st.error("All mandatory fields must be filled")
         else:
             if new_status != "No Change":
                 tasks_col.update_one(
