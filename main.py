@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 from datetime import date
+from pymongo import MongoClient
 
 # =====================================================
 # USERS (POC – HARD CODED)
@@ -23,25 +24,24 @@ TASK_STATUS = ["To Do", "Running", "Done"]
 LEAVE_TYPES = {"CL": 15, "SL": 7, "COURSE": 7}
 
 # =====================================================
-# SESSION STATE (IN-MEMORY DATABASE)
+# MONGO CONNECTION
 # =====================================================
-if "tasks" not in st.session_state:
-    st.session_state.tasks = []
+MONGO_URI = st.secrets["mongo"]
+client = MongoClient(MONGO_URI)
 
-if "logs" not in st.session_state:
-    st.session_state.logs = []
-
-if "leaves" not in st.session_state:
-    st.session_state.leaves = []
+db = client["nc_ops"]
+tasks_col = db.tasks
+logs_col = db.work_logs
+leaves_col = db.leaves
 
 # =====================================================
 # APP CONFIG
 # =====================================================
-st.set_page_config("Task & Leave Management POC", layout="wide")
-st.title("🧩 Task, Work Log & Leave Management – POC")
+st.set_page_config("Task & Leave Management", layout="wide")
+st.title("🧩 Task, Work Log & Leave Management")
 
 # =====================================================
-# ROLE SELECTION (NO AUTH)
+# ROLE SELECTION
 # =====================================================
 st.sidebar.header("Select Role")
 role = st.sidebar.selectbox("Role", ["NC", "Management"])
@@ -66,23 +66,25 @@ if menu == "Dashboard":
 
     if role == "NC":
         st.subheader("📋 All Tasks")
-        if st.session_state.tasks:
-            st.dataframe(pd.DataFrame(st.session_state.tasks))
+        tasks = list(tasks_col.find({}, {"_id": 0}))
+        if tasks:
+            st.dataframe(pd.DataFrame(tasks))
         else:
             st.info("No tasks created yet")
 
         st.subheader("📌 Live Work Updates")
-        if st.session_state.logs:
-            st.dataframe(pd.DataFrame(st.session_state.logs))
+        logs = list(logs_col.find({}, {"_id": 0}))
+        if logs:
+            st.dataframe(pd.DataFrame(logs))
         else:
             st.info("No activity logged yet")
 
         st.subheader("🌴 Who is on Leave Today")
         today = str(date.today())
-        on_leave = [
-            l for l in st.session_state.leaves
-            if l["date"] == today and l["status"] == "Approved"
-        ]
+        on_leave = list(leaves_col.find(
+            {"date": today, "status": "Approved"},
+            {"_id": 0}
+        ))
         if on_leave:
             st.dataframe(pd.DataFrame(on_leave))
         else:
@@ -90,7 +92,10 @@ if menu == "Dashboard":
 
     else:
         st.subheader("📋 My Tasks")
-        my_tasks = [t for t in st.session_state.tasks if t["assigned_to"] == user]
+        my_tasks = list(tasks_col.find(
+            {"assigned_to": user},
+            {"_id": 0}
+        ))
         if my_tasks:
             st.dataframe(pd.DataFrame(my_tasks))
         else:
@@ -98,15 +103,13 @@ if menu == "Dashboard":
 
         st.subheader("🌴 My Leave Balance")
         used = {}
-        for l in st.session_state.leaves:
-            if l["user"] == user and l["status"] == "Approved":
-                used[l["leave_type"]] = used.get(l["leave_type"], 0) + 1
+        for l in leaves_col.find({"user": user, "status": "Approved"}):
+            used[l["leave_type"]] = used.get(l["leave_type"], 0) + 1
 
         balance = {
             k: LEAVE_TYPES[k] - used.get(k, 0)
             for k in LEAVE_TYPES
         }
-
         st.table(pd.DataFrame(balance.items(), columns=["Leave Type", "Remaining"]))
 
 # =====================================================
@@ -135,15 +138,15 @@ elif menu == "Create Task":
         if not title or not desc or not reporting_ncs:
             st.error("All fields are mandatory")
         else:
-            st.session_state.tasks.append({
-                "task_id": len(st.session_state.tasks) + 1,
+            tasks_col.insert_one({
                 "title": title,
                 "description": desc,
                 "assigned_to": assigned_to,
-                "reporting_ncs": ", ".join(reporting_ncs),
+                "reporting_ncs": reporting_ncs,
                 "start_date": str(start_date),
                 "end_date": str(end_date),
-                "status": "To Do"
+                "status": "To Do",
+                "created_by": user
             })
             st.success("Task created successfully")
 
@@ -159,13 +162,13 @@ elif menu == "Daily Work Log":
 
     today = str(date.today())
 
-    # Block logging if on leave
-    for l in st.session_state.leaves:
-        if l["user"] == user and l["date"] == today and l["status"] == "Approved":
-            st.error("You are on approved leave today")
-            st.stop()
+    if leaves_col.find_one(
+        {"user": user, "date": today, "status": "Approved"}
+    ):
+        st.error("You are on approved leave today")
+        st.stop()
 
-    my_tasks = [t for t in st.session_state.tasks if t["assigned_to"] == user]
+    my_tasks = list(tasks_col.find({"assigned_to": user}))
     if not my_tasks:
         st.warning("No tasks assigned")
         st.stop()
@@ -193,7 +196,10 @@ elif menu == "Daily Work Log":
     if activity_type == "Task Work":
         status = st.selectbox("Task Status", TASK_STATUS)
         log["details"] = st.text_area("Work Done *")
-        task_titles[selected_task]["status"] = status
+        tasks_col.update_one(
+            {"title": selected_task},
+            {"$set": {"status": status}}
+        )
 
     elif activity_type == "Call":
         log["call_with"] = st.selectbox("Call With", CALL_WITH)
@@ -215,7 +221,7 @@ elif menu == "Daily Work Log":
         if not log.get("details"):
             st.error("Details are mandatory")
         else:
-            st.session_state.logs.append(log)
+            logs_col.insert_one(log)
             st.success("Daily work logged successfully")
 
 # =====================================================
@@ -231,16 +237,17 @@ elif menu == "Leave":
         leave_date = st.date_input("Leave Date", min_value=date.today())
         reason = st.text_area("Reason *")
 
-        used = sum(
-            1 for l in st.session_state.leaves
-            if l["user"] == user and l["leave_type"] == leave_type and l["status"] == "Approved"
-        )
+        used = leaves_col.count_documents({
+            "user": user,
+            "leave_type": leave_type,
+            "status": "Approved"
+        })
 
         if used >= LEAVE_TYPES[leave_type]:
             st.error("Leave balance exhausted")
 
         if st.button("Apply Leave"):
-            st.session_state.leaves.append({
+            leaves_col.insert_one({
                 "user": user,
                 "leave_type": leave_type,
                 "date": str(leave_date),
@@ -254,7 +261,7 @@ elif menu == "Leave":
     else:
         st.subheader("Pending Leave Requests")
 
-        pending = [l for l in st.session_state.leaves if l["status"] == "Pending"]
+        pending = list(leaves_col.find({"status": "Pending"}))
 
         if not pending:
             st.info("No pending leave requests")
@@ -269,12 +276,21 @@ elif menu == "Leave":
 
                 col1, col2 = st.columns(2)
                 if col1.button("Approve", key=f"app_{idx}"):
-                    l["status"] = "Approved"
-                    l["action_by"] = user
+                    leaves_col.update_one(
+                        {"_id": l["_id"]},
+                        {"$set": {"status": "Approved", "action_by": user}}
+                    )
                     st.success("Leave approved")
 
                 if col2.button("Reject", key=f"rejbtn_{idx}"):
-                    l["status"] = "Rejected"
-                    l["action_by"] = user
-                    l["action_reason"] = rej_reason
+                    leaves_col.update_one(
+                        {"_id": l["_id"]},
+                        {
+                            "$set": {
+                                "status": "Rejected",
+                                "action_by": user,
+                                "action_reason": rej_reason
+                            }
+                        }
+                    )
                     st.warning("Leave rejected")
