@@ -3,6 +3,10 @@ import pandas as pd
 from datetime import date
 from pymongo import MongoClient
 
+from langchain_groq import ChatGroq
+from langchain.prompts import PromptTemplate
+from langchain.chains import LLMChain
+
 # =====================================================
 # USERS (POC)
 # =====================================================
@@ -30,10 +34,43 @@ logs_col = db.work_logs
 leaves_col = db.leaves
 
 # =====================================================
+# LLM (CHATGROQ)
+# =====================================================
+llm = ChatGroq(
+    api_key=st.secrets["api_key"],
+    model_name="llama3-70b-8192",
+    temperature=0.2
+)
+
+summary_prompt = PromptTemplate(
+    input_variables=["name", "logs"],
+    template="""
+You are a National Coordinator reviewing daily work.
+
+Summarize the work done today by {name}.
+Be professional, concise, and structured.
+
+Focus on:
+- Tasks worked on
+- Calls (who was called, role, outcome)
+- Meetings (type and outcome)
+- Task status changes
+- Risks, delays, or follow-ups
+
+Work logs:
+{logs}
+
+Return a clear bullet-point summary.
+"""
+)
+
+summary_chain = LLMChain(llm=llm, prompt=summary_prompt)
+
+# =====================================================
 # APP CONFIG
 # =====================================================
-st.set_page_config("Task & Leave Management", layout="wide")
-st.title("🧩 Task, Work Log & Leave Management")
+st.set_page_config("Task, Leave & AI Review System", layout="wide")
+st.title("🧩 Task, Work Log, Leave & AI Review System")
 
 # =====================================================
 # ROLE SELECTION
@@ -48,7 +85,8 @@ user = (
 )
 
 menu = st.sidebar.radio(
-    "Menu", ["Dashboard", "Create Task", "Daily Work Log", "Leave"]
+    "Menu",
+    ["Dashboard", "Create Task", "Daily Work Log", "Leave"]
 )
 
 # =====================================================
@@ -58,6 +96,7 @@ if menu == "Dashboard":
     st.header("📊 Dashboard")
 
     if role == "NC":
+        # ---------- TASKS ----------
         st.subheader("📋 All Tasks")
         tasks = list(tasks_col.find({}, {"_id": 0}))
         if tasks:
@@ -65,6 +104,7 @@ if menu == "Dashboard":
         else:
             st.info("No tasks created")
 
+        # ---------- WORK LOGS ----------
         st.subheader("📌 Live Work Logs")
         logs = list(logs_col.find({}, {"_id": 0}))
         if logs:
@@ -72,6 +112,7 @@ if menu == "Dashboard":
         else:
             st.info("No logs yet")
 
+        # ---------- ON LEAVE ----------
         st.subheader("🌴 On Leave Today")
         today = str(date.today())
         on_leave = list(leaves_col.find(
@@ -82,6 +123,57 @@ if menu == "Dashboard":
         else:
             st.info("No one on leave today")
 
+        # =================================================
+        # 🤖 AI DAILY REVIEW (CHATGROQ)
+        # =================================================
+        st.divider()
+        st.subheader("🧠 AI Daily Management Review")
+
+        review_date = st.date_input("Select Review Date", date.today())
+        review_date_str = str(review_date)
+
+        if st.button("🚀 Generate Daily Summary"):
+            day_logs = list(logs_col.find(
+                {"date": review_date_str},
+                {"_id": 0}
+            ))
+
+            if not day_logs:
+                st.warning("No logs found for this date")
+            else:
+                df = pd.DataFrame(day_logs)
+                consolidated = []
+
+                st.markdown("## 👤 Individual Summaries")
+
+                for member in MANAGEMENT:
+                    member_logs = df[df["user"] == member]
+
+                    if member_logs.empty:
+                        summary = f"**{member}:** No activity logged."
+                    else:
+                        logs_text = member_logs.to_dict(orient="records")
+                        summary = summary_chain.run(
+                            name=member,
+                            logs=logs_text
+                        )
+
+                    consolidated.append(f"### {member}\n{summary}")
+                    st.markdown(consolidated[-1])
+
+                st.divider()
+                st.markdown("## 📧 Consolidated NC Summary")
+
+                final_summary = "\n\n".join(consolidated)
+                st.text_area(
+                    "Email-ready summary",
+                    final_summary,
+                    height=400
+                )
+
+    # =================================================
+    # MANAGEMENT DASHBOARD
+    # =================================================
     else:
         st.subheader("📋 My Tasks")
         my_tasks = list(tasks_col.find({"assigned_to": user}, {"_id": 0}))
@@ -138,7 +230,7 @@ elif menu == "Create Task":
             st.success("Task created")
 
 # =====================================================
-# DAILY WORK LOG (CALL NAME INCLUDED)
+# DAILY WORK LOG
 # =====================================================
 elif menu == "Daily Work Log":
     st.header("📅 Daily Work Log")
@@ -149,9 +241,7 @@ elif menu == "Daily Work Log":
 
     today = str(date.today())
 
-    if leaves_col.find_one(
-        {"user": user, "date": today, "status": "Approved"}
-    ):
+    if leaves_col.find_one({"user": user, "date": today, "status": "Approved"}):
         st.error("You are on approved leave today")
         st.stop()
 
@@ -198,7 +288,7 @@ elif menu == "Daily Work Log":
         log["meeting_with"] = st.selectbox("Meeting With", MEETING_WITH)
         log["mode"] = st.selectbox("Mode", ["Online", "Offline"])
         log["state"] = st.text_input("State")
-        log["details"] = st.text_area("Minutes of Meeting (MOM) *")
+        log["details"] = st.text_area("MOM *")
 
     else:
         log["work_category"] = st.selectbox("Work Category", OTHER_WORK_TYPES)
@@ -206,10 +296,8 @@ elif menu == "Daily Work Log":
         log["details"] = st.text_area("Work Description *")
 
     if st.button("Submit Daily Log"):
-        if not log.get("details") or (
-            activity_type == "Call" and not log.get("called_person_name")
-        ):
-            st.error("All mandatory fields must be filled")
+        if not log.get("details"):
+            st.error("Details are mandatory")
         else:
             if new_status != "No Change":
                 tasks_col.update_one(
