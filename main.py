@@ -1,63 +1,54 @@
 import streamlit as st
 import pandas as pd
-from datetime import date
+from datetime import date, datetime
 from pymongo import MongoClient
+import bcrypt
 import yagmail
 
 from langchain_groq import ChatGroq
 from langchain_core.prompts import PromptTemplate
 
 # =====================================================
-# USERS & EMAILS
-# =====================================================
-NCS = ["Rishabh", "Kunal", "Subhodeep"]
-MANAGEMENT = ["Akshay", "Vatsal", "Narendra"]
-
-NC_EMAILS = {
-    "Rishabh": "purohitrm@gmail.com",
-    "Kunal": "kunaljgd@gmail.com",
-    "Subhodeep": "chatterjeesubhodeep08@gmail.com"
-}
-
-MGMT_EMAILS = {
-    "Narendra": "aolsm.rc2@srisripublications.com",
-    "Akshay": "akshay@srisripublications.com",
-    "Vatsal": "aolsm.rc1@srisripublications.com"
-}
-
-OFFICIAL_NC_EMAIL = "aolsm.nc@srisripublications.com"
-
-CALL_WITH = ["NC", "SC", "AC", "DC", "Other"]
-MEETING_WITH = ["NC", "SC", "AC", "DC"]
-TASK_STATUS = ["To Do", "Running", "Done"]
-LEAVE_TYPES = {"CL": 15, "SL": 7, "COURSE": 7}
-
-# =====================================================
 # DB
 # =====================================================
-client = MongoClient(st.secrets["mongo"])
+client = MongoClient(st.secrets["mongo"]["uri"])
 db = client["nc_ops"]
 
+users_col = db.users
 tasks_col = db.tasks
 logs_col = db.work_logs
 leaves_col = db.leaves
 
 # =====================================================
-# EMAIL (YAGMAIL)
+# EMAILS
 # =====================================================
+NC_EMAILS = {
+    "Rishabh Purohit": "purohitrm@gmail.com",
+    "Kunal Bhaiya": "kunaljgd@gmail.com",
+    "Subhodeep Chatterjee": "chatterjeesubhodeep08@gmail.com"
+}
+
+MGMT_EMAILS = {
+    "Akshay Kachchhi": "akshay@srisripublications.com",
+    "Vatsal Patel": "aolsm.rc1@srisripublications.com",
+    "Narendra Wamburkar": "aolsm.rc2@srisripublications.com"
+}
+
+OFFICIAL_NC_EMAIL = "aolsm.nc@srisripublications.com"
+
 yag = yagmail.SMTP(
-    user=st.secrets["user"],
-    password=st.secrets["password"]
+    st.secrets["email"]["user"],
+    st.secrets["email"]["password"]
 )
 
 def send_email(to, subject, body, cc=None):
     yag.send(to=to, subject=subject, contents=body, cc=cc)
 
 # =====================================================
-# LLM (ChatGroq – LCEL)
+# LLM (ChatGroq)
 # =====================================================
 llm = ChatGroq(
-    api_key=st.secrets["api_key"],
+    api_key=st.secrets["groq"]["api_key"],
     model="llama3-70b-8192",
     temperature=0.2
 )
@@ -65,17 +56,16 @@ llm = ChatGroq(
 summary_prompt = PromptTemplate.from_template("""
 You are a National Coordinator reviewing daily work.
 
-Summarize the work done today by {name}.
-Be concise, professional, and structured.
+Summarize work done today by {name}.
 
-Cover:
-- Tasks worked on
-- Calls (who was called, role, outcome)
-- Meetings (type and outcome)
-- Task status changes
-- Risks or follow-ups
+Focus on:
+- Tasks
+- Calls
+- Meetings
+- Status changes
+- Risks
 
-Work logs:
+Logs:
 {logs}
 
 Return bullet points.
@@ -84,73 +74,122 @@ Return bullet points.
 summary_chain = summary_prompt | llm
 
 # =====================================================
-# UI
+# AUTH HELPERS
 # =====================================================
-st.set_page_config("NC Ops System", layout="wide")
-st.title("🧩 NC Task, Work Log & AI Review System")
+def hash_pw(pw):
+    return bcrypt.hashpw(pw.encode(), bcrypt.gensalt())
 
-role = st.sidebar.selectbox("Role", ["NC", "Management"])
-user = (
-    st.sidebar.selectbox("NC Name", NCS)
-    if role == "NC"
-    else st.sidebar.selectbox("Management Name", MANAGEMENT)
-)
+def verify_pw(pw, hashed):
+    return bcrypt.checkpw(pw.encode(), hashed)
+
+if "user" not in st.session_state:
+    st.session_state.user = None
+
+# =====================================================
+# LOGIN
+# =====================================================
+if not st.session_state.user:
+    st.title("🔐 Login")
+
+    email = st.text_input("Email")
+    user_doc = users_col.find_one({"email": email, "active": True}) if email else None
+
+    if email and not user_doc:
+        st.error("Unauthorized user")
+        st.stop()
+
+    if user_doc:
+        if user_doc["first_login"]:
+            st.subheader("Create Password")
+            p1 = st.text_input("Password", type="password")
+            p2 = st.text_input("Confirm Password", type="password")
+
+            if st.button("Set Password"):
+                if not p1 or p1 != p2:
+                    st.error("Passwords do not match")
+                else:
+                    users_col.update_one(
+                        {"_id": user_doc["_id"]},
+                        {"$set": {
+                            "password_hash": hash_pw(p1),
+                            "first_login": False,
+                            "updated_at": datetime.utcnow()
+                        }}
+                    )
+                    st.success("Password set. Please login again.")
+                    st.stop()
+        else:
+            pwd = st.text_input("Password", type="password")
+            if st.button("Login"):
+                if verify_pw(pwd, user_doc["password_hash"]):
+                    st.session_state.user = {
+                        "name": user_doc["name"],
+                        "email": user_doc["email"],
+                        "role": user_doc["role"]
+                    }
+                    st.rerun()
+                else:
+                    st.error("Invalid password")
+
+    st.stop()
+
+# =====================================================
+# CONTEXT
+# =====================================================
+current_user = st.session_state.user
+role = current_user["role"]
+user = current_user["name"]
+
+st.sidebar.markdown(f"""
+**Logged in as**  
+{current_user['name']}  
+{current_user['email']}
+""")
+
+if st.sidebar.button("Logout"):
+    st.session_state.user = None
+    st.rerun()
 
 menu = st.sidebar.radio(
     "Menu", ["Dashboard", "Create Task", "Daily Work Log", "Leave"]
 )
 
 # =====================================================
-# DASHBOARD
+# DASHBOARD (NC ONLY AI SUMMARY SHOWN)
 # =====================================================
 if menu == "Dashboard":
+    st.header("Dashboard")
 
-    if role == "NC":
-        st.subheader("📋 All Tasks")
+    if role == "nc":
+        st.subheader("All Tasks")
         st.dataframe(pd.DataFrame(list(tasks_col.find({}, {"_id": 0}))))
 
-        st.subheader("📌 Live Logs")
-        st.dataframe(pd.DataFrame(list(logs_col.find({}, {"_id": 0}))))
-
-        st.divider()
-        st.subheader("🧠 AI Daily Summary")
-
-        review_date = str(st.date_input("Review Date", date.today()))
+        st.subheader("AI Daily Summary")
+        review_date = str(st.date_input("Date", date.today()))
 
         if st.button("Generate & Email Summary"):
-            day_logs = list(logs_col.find({"date": review_date}, {"_id": 0}))
-            df = pd.DataFrame(day_logs)
+            logs = list(logs_col.find({"date": review_date}, {"_id": 0}))
+            df = pd.DataFrame(logs)
 
-            full_summary = []
-
-            for m in MANAGEMENT:
-                member_logs = df[df["user"] == m]
-                if member_logs.empty:
-                    summary = f"{m}: No activity."
-                else:
-                    summary = summary_chain.invoke({
+            summaries = []
+            for m, mail in MGMT_EMAILS.items():
+                mlogs = df[df["user"] == m]
+                if not mlogs.empty:
+                    text = summary_chain.invoke({
                         "name": m,
-                        "logs": member_logs.to_dict(orient="records")
+                        "logs": mlogs.to_dict(orient="records")
                     }).content
+                    send_email(mail, f"[Your Summary] {review_date}", text)
+                    summaries.append(f"{m}\n{text}")
 
-                full_summary.append(f"{m}\n{summary}")
-
-                # Send personal summary
-                send_email(
-                    to=MGMT_EMAILS[m],
-                    subject=f"[Your Daily Work Summary] {review_date}",
-                    body=summary
-                )
-
-            # Send consolidated to NCs
             send_email(
-                to=list(NC_EMAILS.values()),
-                cc=OFFICIAL_NC_EMAIL,
-                subject=f"[Daily Ops Summary] {review_date}",
-                body="\n\n".join(full_summary)
+                list(NC_EMAILS.values()),
+                f"[Daily Ops Summary] {review_date}",
+                "\n\n".join(summaries),
+                cc=OFFICIAL_NC_EMAIL
             )
 
-            st.success("Daily summaries emailed")
+            st.success("Summary emailed")
 
 # =====================================================
 # CREATE TASK
@@ -158,16 +197,15 @@ if menu == "Dashboard":
 elif menu == "Create Task":
     title = st.text_input("Task Title")
     desc = st.text_area("Description")
-
     start = st.date_input("Start Date")
     end = st.date_input("End Date")
 
-    if role == "NC":
-        assigned_to = st.selectbox("Assign To", MANAGEMENT)
-        reporters = st.multiselect("Reporting NCs", NCS, default=[user])
+    if role == "nc":
+        assigned_to = st.selectbox("Assign To", list(MGMT_EMAILS.keys()))
+        reporters = st.multiselect("Reporting NCs", list(NC_EMAILS.keys()), default=[user])
     else:
         assigned_to = user
-        reporters = st.multiselect("Reporting NCs", NCS)
+        reporters = st.multiselect("Reporting NCs", list(NC_EMAILS.keys()))
 
     if st.button("Create Task"):
         tasks_col.insert_one({
@@ -182,83 +220,58 @@ elif menu == "Create Task":
         })
 
         send_email(
-            to=MGMT_EMAILS.get(assigned_to),
-            cc=[NC_EMAILS[n] for n in reporters],
-            subject=f"[Task Assigned] {title}",
-            body=f"""
-Task: {title}
-Description: {desc}
-Start: {start}
-End: {end}
-Assigned To: {assigned_to}
-Reporting NCs: {', '.join(reporters)}
-Created By: {user}
-"""
+            MGMT_EMAILS.get(assigned_to),
+            f"[Task Assigned] {title}",
+            f"{desc}\nStart: {start}\nEnd: {end}",
+            cc=[NC_EMAILS[n] for n in reporters]
         )
 
-        st.success("Task created & email sent")
+        st.success("Task created")
 
 # =====================================================
 # DAILY WORK LOG
 # =====================================================
 elif menu == "Daily Work Log":
-    if role != "Management":
+    if role != "management":
         st.stop()
 
     today = str(date.today())
     tasks = list(tasks_col.find({"assigned_to": user}))
-
     task_map = {t["title"]: t for t in tasks}
+
     task = st.selectbox("Task", task_map.keys())
-
-    activity = st.selectbox("Activity", ["Task Work", "Call", "Meeting", "Other"])
-    details = st.text_area("Details")
-
-    new_status = st.selectbox("Update Status", ["No Change"] + TASK_STATUS)
+    details = st.text_area("Work Done")
+    status = st.selectbox("Update Status", ["No Change", "To Do", "Running", "Done"])
 
     if st.button("Submit Log"):
-        log = {
+        logs_col.insert_one({
             "date": today,
             "user": user,
             "task": task,
-            "activity_type": activity,
-            "details": details
-        }
+            "details": details,
+            "updated_status": status
+        })
 
-        if new_status != "No Change":
-            tasks_col.update_one({"title": task}, {"$set": {"status": new_status}})
-            log["updated_task_status"] = new_status
-
-        logs_col.insert_one(log)
+        if status != "No Change":
+            tasks_col.update_one({"title": task}, {"$set": {"status": status}})
 
         reporters = task_map[task]["reporting_ncs"]
 
         send_email(
-            to=[NC_EMAILS[n] for n in reporters],
-            cc=MGMT_EMAILS[user],
-            subject=f"[Daily Update][{user}] {task}",
-            body=f"""
-User: {user}
-Task: {task}
-Activity: {activity}
-
-Details:
-{details}
-
-Status Update:
-{new_status}
-"""
+            [NC_EMAILS[n] for n in reporters],
+            f"[Daily Update] {user} | {task}",
+            details,
+            cc=MGMT_EMAILS[user]
         )
 
-        st.success("Log saved & email sent")
+        st.success("Log saved")
 
 # =====================================================
 # LEAVE
 # =====================================================
 elif menu == "Leave":
-
-    if role == "Management":
-        leave_type = st.selectbox("Leave Type", LEAVE_TYPES.keys())
+    if role == "management":
+        leave_type = st.selectbox("Leave Type", ["CL", "SL", "COURSE"])
         leave_date = st.date_input("Leave Date")
         reason = st.text_area("Reason")
 
@@ -272,23 +285,10 @@ elif menu == "Leave":
             })
 
             send_email(
-                to=list(NC_EMAILS.values()),
-                cc=MGMT_EMAILS[user],
-                subject=f"[Leave Request] {user} | {leave_type} | {leave_date}",
-                body=reason
+                list(NC_EMAILS.values()),
+                f"[Leave Request] {user}",
+                reason,
+                cc=MGMT_EMAILS[user]
             )
 
-            st.success("Leave applied & email sent")
-
-    else:
-        pending = list(leaves_col.find({"status": "Pending"}))
-        for l in pending:
-            with st.expander(f"{l['user']} | {l['leave_type']} | {l['date']}"):
-                if st.button("Approve", key=l["_id"]):
-                    leaves_col.update_one({"_id": l["_id"]}, {"$set": {"status": "Approved"}})
-                    send_email(
-                        to=MGMT_EMAILS[l["user"]],
-                        cc=list(NC_EMAILS.values()),
-                        subject=f"[Leave Approved] {l['leave_type']} | {l['date']}",
-                        body="Approved"
-                    )
+            st.success("Leave applied")
