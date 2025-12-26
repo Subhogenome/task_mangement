@@ -20,6 +20,7 @@ OTHER_WORK_TYPES = [
 ]
 
 TASK_STATUS = ["To Do", "Running", "Done"]
+LEAVE_TYPES = {"CL": 15, "SL": 7, "COURSE": 7}
 
 # =====================================================
 # SESSION STATE (IN-MEMORY DB)
@@ -30,14 +31,17 @@ if "tasks" not in st.session_state:
 if "logs" not in st.session_state:
     st.session_state.logs = []
 
+if "leaves" not in st.session_state:
+    st.session_state.leaves = []
+
 # =====================================================
 # APP HEADER
 # =====================================================
-st.set_page_config("Task Delegation POC", layout="wide")
-st.title("🧩 Task Delegation & Daily Logging – POC")
+st.set_page_config("Task & Leave Management POC", layout="wide")
+st.title("🧩 Task, Work Log & Leave Management – POC")
 
 # =====================================================
-# ROLE SELECTION (NO AUTH)
+# ROLE SELECTION
 # =====================================================
 st.sidebar.header("Select Role")
 role = st.sidebar.selectbox("Role", ["NC", "Management"])
@@ -51,7 +55,7 @@ st.sidebar.divider()
 
 menu = st.sidebar.radio(
     "Menu",
-    ["Dashboard", "Create Task", "Daily Work Log"]
+    ["Dashboard", "Create Task", "Daily Work Log", "Leave"]
 )
 
 # =====================================================
@@ -61,32 +65,38 @@ if menu == "Dashboard":
     st.header("📊 Dashboard")
 
     if role == "NC":
-        st.subheader("All Tasks")
-        if st.session_state.tasks:
-            df = pd.DataFrame(st.session_state.tasks)
-            st.dataframe(df)
-        else:
-            st.info("No tasks created yet")
+        st.subheader("📋 All Tasks")
+        st.dataframe(pd.DataFrame(st.session_state.tasks)) if st.session_state.tasks else st.info("No tasks")
 
-        st.subheader("Live Work Updates")
-        if st.session_state.logs:
-            st.dataframe(pd.DataFrame(st.session_state.logs))
-        else:
-            st.info("No activity logged yet")
+        st.subheader("📌 Live Work Updates")
+        st.dataframe(pd.DataFrame(st.session_state.logs)) if st.session_state.logs else st.info("No logs")
+
+        st.subheader("🌴 Who is on Leave Today")
+        today = str(date.today())
+        on_leave = [
+            l for l in st.session_state.leaves
+            if l["date"] == today and l["status"] == "Approved"
+        ]
+        st.dataframe(pd.DataFrame(on_leave)) if on_leave else st.info("No one on leave today")
 
     else:
-        st.subheader("My Assigned Tasks")
-        my_tasks = [
-            t for t in st.session_state.tasks
-            if t["assigned_to"] == user
-        ]
-        if my_tasks:
-            st.dataframe(pd.DataFrame(my_tasks))
-        else:
-            st.info("No tasks assigned to you yet")
+        st.subheader("📋 My Tasks")
+        my_tasks = [t for t in st.session_state.tasks if t["assigned_to"] == user]
+        st.dataframe(pd.DataFrame(my_tasks)) if my_tasks else st.info("No tasks")
+
+        st.subheader("🌴 My Leave Balance")
+        used = pd.DataFrame(
+            [l for l in st.session_state.leaves if l["user"] == user and l["status"] == "Approved"]
+        )["leave_type"].value_counts().to_dict() if st.session_state.leaves else {}
+
+        balance = {
+            k: v - used.get(k, 0)
+            for k, v in LEAVE_TYPES.items()
+        }
+        st.table(pd.DataFrame(balance.items(), columns=["Leave Type", "Remaining"]))
 
 # =====================================================
-# CREATE TASK (WITH DATES)
+# CREATE TASK
 # =====================================================
 elif menu == "Create Task":
     st.header("📝 Create Task")
@@ -102,34 +112,23 @@ elif menu == "Create Task":
 
     if role == "NC":
         assigned_to = st.selectbox("Assign to Management", MANAGEMENT)
-        reporting_ncs = st.multiselect(
-            "Reporting NC(s)",
-            NCS,
-            default=[user]
-        )
+        reporting_ncs = st.multiselect("Reporting NC(s)", NCS, default=[user])
     else:
         assigned_to = user
-        reporting_ncs = st.multiselect(
-            "Reporting NC(s)",
-            NCS
-        )
+        reporting_ncs = st.multiselect("Reporting NC(s)", NCS)
 
     if st.button("Create Task"):
-        if not title or not desc or not reporting_ncs:
-            st.error("All fields are mandatory")
-        else:
-            task = {
-                "task_id": len(st.session_state.tasks) + 1,
-                "title": title,
-                "description": desc,
-                "assigned_to": assigned_to,
-                "reporting_ncs": ", ".join(reporting_ncs),
-                "start_date": str(start_date),
-                "end_date": str(end_date),
-                "status": "To Do"
-            }
-            st.session_state.tasks.append(task)
-            st.success("Task created successfully")
+        st.session_state.tasks.append({
+            "task_id": len(st.session_state.tasks) + 1,
+            "title": title,
+            "description": desc,
+            "assigned_to": assigned_to,
+            "reporting_ncs": ", ".join(reporting_ncs),
+            "start_date": str(start_date),
+            "end_date": str(end_date),
+            "status": "To Do"
+        })
+        st.success("Task created")
 
 # =====================================================
 # DAILY WORK LOG
@@ -138,73 +137,110 @@ elif menu == "Daily Work Log":
     st.header("📅 Daily Work Log")
 
     if role != "Management":
-        st.info("Only management can log daily work")
+        st.info("Only management can log work")
         st.stop()
 
-    my_tasks = [
-        t for t in st.session_state.tasks
-        if t["assigned_to"] == user
-    ]
+    today = str(date.today())
+    if any(
+        l for l in st.session_state.leaves
+        if l["user"] == user and l["date"] == today and l["status"] == "Approved"
+    ):
+        st.error("You are on approved leave today")
+        st.stop()
 
+    my_tasks = [t for t in st.session_state.tasks if t["assigned_to"] == user]
     if not my_tasks:
-        st.warning("No tasks assigned to you")
+        st.warning("No tasks assigned")
         st.stop()
 
     task_titles = {t["title"]: t for t in my_tasks}
-    selected_task = st.selectbox("Select Task", task_titles.keys())
+    selected_task = st.selectbox("Task", task_titles.keys())
 
-    # Show task timeline context
-    st.info(
-        f"🗓️ Task Timeline: "
-        f"{task_titles[selected_task]['start_date']} → "
-        f"{task_titles[selected_task]['end_date']}"
-    )
+    activity_type = st.selectbox("Activity Type", ["Task Work", "Call", "Meeting", "Other"])
 
-    activity_type = st.selectbox(
-        "Activity Type",
-        ["Task Work", "Call", "Meeting", "Other"]
-    )
-
-    log = {
-        "date": str(date.today()),
-        "user": user,
-        "task": selected_task,
-        "activity_type": activity_type
-    }
+    log = {"date": today, "user": user, "task": selected_task, "activity_type": activity_type}
 
     if activity_type == "Task Work":
         status = st.selectbox("Task Status", TASK_STATUS)
-        work = st.text_area("Work Done")
-        log["status"] = status
-        log["details"] = work
+        log["details"] = st.text_area("Work Done")
         task_titles[selected_task]["status"] = status
 
     elif activity_type == "Call":
-        call_with = st.selectbox("Call With", CALL_WITH)
-        state = st.text_input("State")
-        notes = st.text_area("Call Notes")
-        log["call_with"] = call_with
-        log["state"] = state
-        log["details"] = notes
+        log["call_with"] = st.selectbox("Call With", CALL_WITH)
+        log["state"] = st.text_input("State")
+        log["details"] = st.text_area("Call Notes")
 
     elif activity_type == "Meeting":
-        meet_with = st.selectbox("Meeting With", MEETING_WITH)
-        mode = st.selectbox("Mode", ["Online", "Offline"])
-        state = st.text_input("State (if any)")
-        mom = st.text_area("Minutes of Meeting (MOM)")
-        log["meeting_with"] = meet_with
-        log["mode"] = mode
-        log["state"] = state
-        log["details"] = mom
+        log["meeting_with"] = st.selectbox("Meeting With", MEETING_WITH)
+        log["mode"] = st.selectbox("Mode", ["Online", "Offline"])
+        log["state"] = st.text_input("State")
+        log["details"] = st.text_area("MOM")
 
-    elif activity_type == "Other":
-        work_type = st.selectbox("Work Category", OTHER_WORK_TYPES)
-        state = st.text_input("State (if applicable)")
-        desc = st.text_area("Work Description")
-        log["work_category"] = work_type
-        log["state"] = state
-        log["details"] = desc
+    else:
+        log["work_category"] = st.selectbox("Work Category", OTHER_WORK_TYPES)
+        log["state"] = st.text_input("State")
+        log["details"] = st.text_area("Description")
 
     if st.button("Submit Daily Log"):
         st.session_state.logs.append(log)
-        st.success("Daily work logged successfully")
+        st.success("Work logged")
+
+# =====================================================
+# LEAVE MANAGEMENT
+# =====================================================
+elif menu == "Leave":
+    st.header("🌴 Leave Management")
+
+    today = str(date.today())
+
+    if role == "Management":
+        st.subheader("Apply for Leave")
+
+        leave_type = st.selectbox("Leave Type", LEAVE_TYPES.keys())
+        leave_date = st.date_input("Leave Date", min_value=date.today())
+        reason = st.text_area("Reason")
+
+        used = [
+            l for l in st.session_state.leaves
+            if l["user"] == user and l["leave_type"] == leave_type and l["status"] == "Approved"
+        ]
+
+        if len(used) >= LEAVE_TYPES[leave_type]:
+            st.error("Leave balance exhausted")
+
+        elif st.button("Apply Leave"):
+            st.session_state.leaves.append({
+                "user": user,
+                "leave_type": leave_type,
+                "date": str(leave_date),
+                "reason": reason,
+                "status": "Pending",
+                "action_by": "",
+                "action_reason": ""
+            })
+            st.success("Leave applied")
+
+    else:
+        st.subheader("Pending Leave Requests")
+
+        pending = [l for l in st.session_state.leaves if l["status"] == "Pending"]
+
+        if not pending:
+            st.info("No pending leave requests")
+
+        for i, l in enumerate(pending):
+            with st.expander(f"{l['user']} – {l['leave_type']} – {l['date']}"):
+                st.write("Reason:", l["reason"])
+                rej_reason = st.text_input("Rejection Reason (if rejecting)", key=i)
+
+                col1, col2 = st.columns(2)
+                if col1.button("Approve", key=f"a{i}"):
+                    l["status"] = "Approved"
+                    l["action_by"] = user
+                    st.success("Approved")
+
+                if col2.button("Reject", key=f"r{i}"):
+                    l["status"] = "Rejected"
+                    l["action_by"] = user
+                    l["action_reason"] = rej_reason
+                    st.warning("Rejected")
