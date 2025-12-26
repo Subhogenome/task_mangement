@@ -2,30 +2,40 @@ import streamlit as st
 import pandas as pd
 from datetime import date
 from pymongo import MongoClient
+import yagmail
 
 from langchain_groq import ChatGroq
 from langchain_core.prompts import PromptTemplate
 
 # =====================================================
-# USERS (POC)
+# USERS & EMAILS
 # =====================================================
-NCS = ["Kunal", "Subhodeep", "Rishabh"]
+NCS = ["Rishabh", "Kunal", "Subhodeep"]
 MANAGEMENT = ["Akshay", "Vatsal", "Narendra"]
+
+NC_EMAILS = {
+    "Rishabh": "purohitrm@gmail.com",
+    "Kunal": "kunaljgd@gmail.com",
+    "Subhodeep": "chatterjeesubhodeep08@gmail.com"
+}
+
+MGMT_EMAILS = {
+    "Narendra": "aolsm.rc2@srisripublications.com",
+    "Akshay": "akshay@srisripublications.com",
+    "Vatsal": "aolsm.rc1@srisripublications.com"
+}
+
+OFFICIAL_NC_EMAIL = "aolsm.nc@srisripublications.com"
 
 CALL_WITH = ["NC", "SC", "AC", "DC", "Other"]
 MEETING_WITH = ["NC", "SC", "AC", "DC"]
-OTHER_WORK_TYPES = [
-    "Documentation", "Coordination", "Planning",
-    "Review", "Content Creation", "Other"
-]
-
 TASK_STATUS = ["To Do", "Running", "Done"]
 LEAVE_TYPES = {"CL": 15, "SL": 7, "COURSE": 7}
 
 # =====================================================
 # DB
 # =====================================================
-client = MongoClient(st.secrets["mongo"])
+client = MongoClient(st.secrets["mongo"]["uri"])
 db = client["nc_ops"]
 
 tasks_col = db.tasks
@@ -33,10 +43,21 @@ logs_col = db.work_logs
 leaves_col = db.leaves
 
 # =====================================================
+# EMAIL (YAGMAIL)
+# =====================================================
+yag = yagmail.SMTP(
+    user=st.secrets["email"]["user"],
+    password=st.secrets["email"]["password"]
+)
+
+def send_email(to, subject, body, cc=None):
+    yag.send(to=to, subject=subject, contents=body, cc=cc)
+
+# =====================================================
 # LLM (ChatGroq – LCEL)
 # =====================================================
 llm = ChatGroq(
-    api_key=st.secrets["api_key"],
+    api_key=st.secrets["groq"]["api_key"],
     model="llama3-70b-8192",
     temperature=0.2
 )
@@ -63,17 +84,12 @@ Return bullet points.
 summary_chain = summary_prompt | llm
 
 # =====================================================
-# UI CONFIG
+# UI
 # =====================================================
-st.set_page_config("Task & AI Review System", layout="wide")
-st.title("🧩 Task, Work Log, Leave & AI Review System")
+st.set_page_config("NC Ops System", layout="wide")
+st.title("🧩 NC Task, Work Log & AI Review System")
 
-# =====================================================
-# ROLE SELECTION
-# =====================================================
-st.sidebar.header("Role Selection")
 role = st.sidebar.selectbox("Role", ["NC", "Management"])
-
 user = (
     st.sidebar.selectbox("NC Name", NCS)
     if role == "NC"
@@ -81,222 +97,170 @@ user = (
 )
 
 menu = st.sidebar.radio(
-    "Menu",
-    ["Dashboard", "Create Task", "Daily Work Log", "Leave"]
+    "Menu", ["Dashboard", "Create Task", "Daily Work Log", "Leave"]
 )
 
 # =====================================================
 # DASHBOARD
 # =====================================================
 if menu == "Dashboard":
-    st.header("📊 Dashboard")
 
     if role == "NC":
         st.subheader("📋 All Tasks")
-        tasks = list(tasks_col.find({}, {"_id": 0}))
-        if tasks:
-            st.dataframe(pd.DataFrame(tasks))
-        else:
-            st.info("No tasks")
+        st.dataframe(pd.DataFrame(list(tasks_col.find({}, {"_id": 0}))))
 
-        st.subheader("📌 Live Work Logs")
-        logs = list(logs_col.find({}, {"_id": 0}))
-        if logs:
-            st.dataframe(pd.DataFrame(logs))
-        else:
-            st.info("No logs yet")
+        st.subheader("📌 Live Logs")
+        st.dataframe(pd.DataFrame(list(logs_col.find({}, {"_id": 0}))))
 
-        st.subheader("🌴 On Leave Today")
-        today = str(date.today())
-        on_leave = list(leaves_col.find(
-            {"date": today, "status": "Approved"},
-            {"_id": 0}
-        ))
-        if on_leave:
-            st.dataframe(pd.DataFrame(on_leave))
-        else:
-            st.info("No one on leave")
-
-        # ================= AI REVIEW =================
         st.divider()
-        st.subheader("🧠 AI Daily Management Review")
+        st.subheader("🧠 AI Daily Summary")
 
-        review_date = st.date_input("Review Date", date.today())
-        review_date = str(review_date)
+        review_date = str(st.date_input("Review Date", date.today()))
 
-        if st.button("🚀 Generate Daily Summary"):
+        if st.button("Generate & Email Summary"):
             day_logs = list(logs_col.find({"date": review_date}, {"_id": 0}))
+            df = pd.DataFrame(day_logs)
 
-            if not day_logs:
-                st.warning("No logs found")
-            else:
-                df = pd.DataFrame(day_logs)
-                summaries = []
+            full_summary = []
 
-                for member in MANAGEMENT:
-                    member_logs = df[df["user"] == member]
+            for m in MANAGEMENT:
+                member_logs = df[df["user"] == m]
+                if member_logs.empty:
+                    summary = f"{m}: No activity."
+                else:
+                    summary = summary_chain.invoke({
+                        "name": m,
+                        "logs": member_logs.to_dict(orient="records")
+                    }).content
 
-                    if member_logs.empty:
-                        text = f"{member}: No activity logged."
-                    else:
-                        response = summary_chain.invoke({
-                            "name": member,
-                            "logs": member_logs.to_dict(orient="records")
-                        })
-                        text = f"{member}:\n{response.content}"
+                full_summary.append(f"{m}\n{summary}")
 
-                    summaries.append(text)
-                    st.markdown(f"### {text}")
-
-                st.divider()
-                st.text_area(
-                    "📧 Consolidated Summary (Email Ready)",
-                    "\n\n".join(summaries),
-                    height=350
+                # Send personal summary
+                send_email(
+                    to=MGMT_EMAILS[m],
+                    subject=f"[Your Daily Work Summary] {review_date}",
+                    body=summary
                 )
 
-    else:
-        st.subheader("📋 My Tasks")
-        my_tasks = list(tasks_col.find({"assigned_to": user}, {"_id": 0}))
-        if my_tasks:
-            st.dataframe(pd.DataFrame(my_tasks))
-        else:
-            st.info("No tasks")
+            # Send consolidated to NCs
+            send_email(
+                to=list(NC_EMAILS.values()),
+                cc=OFFICIAL_NC_EMAIL,
+                subject=f"[Daily Ops Summary] {review_date}",
+                body="\n\n".join(full_summary)
+            )
 
-        st.subheader("🌴 Leave Balance")
-        used = {}
-        for l in leaves_col.find({"user": user, "status": "Approved"}):
-            used[l["leave_type"]] = used.get(l["leave_type"], 0) + 1
-
-        balance = {k: LEAVE_TYPES[k] - used.get(k, 0) for k in LEAVE_TYPES}
-        st.table(pd.DataFrame(balance.items(), columns=["Type", "Remaining"]))
+            st.success("Daily summaries emailed")
 
 # =====================================================
 # CREATE TASK
 # =====================================================
 elif menu == "Create Task":
-    st.header("📝 Create Task")
+    title = st.text_input("Task Title")
+    desc = st.text_area("Description")
 
-    title = st.text_input("Task Title *")
-    desc = st.text_area("Description *")
-
-    c1, c2 = st.columns(2)
-    start = c1.date_input("Start Date *", min_value=date.today())
-    end = c2.date_input("End Date *", min_value=start)
+    start = st.date_input("Start Date")
+    end = st.date_input("End Date")
 
     if role == "NC":
         assigned_to = st.selectbox("Assign To", MANAGEMENT)
-        reporting_ncs = st.multiselect("Reporting NCs", NCS, default=[user])
+        reporters = st.multiselect("Reporting NCs", NCS, default=[user])
     else:
         assigned_to = user
-        reporting_ncs = st.multiselect("Reporting NCs", NCS)
+        reporters = st.multiselect("Reporting NCs", NCS)
 
     if st.button("Create Task"):
-        if not title or not desc or not reporting_ncs:
-            st.error("All fields mandatory")
-        else:
-            tasks_col.insert_one({
-                "title": title,
-                "description": desc,
-                "assigned_to": assigned_to,
-                "reporting_ncs": reporting_ncs,
-                "start_date": str(start),
-                "end_date": str(end),
-                "status": "To Do",
-                "created_by": user
-            })
-            st.success("Task created")
+        tasks_col.insert_one({
+            "title": title,
+            "description": desc,
+            "assigned_to": assigned_to,
+            "reporting_ncs": reporters,
+            "start_date": str(start),
+            "end_date": str(end),
+            "status": "To Do",
+            "created_by": user
+        })
+
+        send_email(
+            to=MGMT_EMAILS.get(assigned_to),
+            cc=[NC_EMAILS[n] for n in reporters],
+            subject=f"[Task Assigned] {title}",
+            body=f"""
+Task: {title}
+Description: {desc}
+Start: {start}
+End: {end}
+Assigned To: {assigned_to}
+Reporting NCs: {', '.join(reporters)}
+Created By: {user}
+"""
+        )
+
+        st.success("Task created & email sent")
 
 # =====================================================
 # DAILY WORK LOG
 # =====================================================
 elif menu == "Daily Work Log":
-    st.header("📅 Daily Work Log")
-
     if role != "Management":
-        st.info("Only management can log work")
         st.stop()
 
     today = str(date.today())
-
-    if leaves_col.find_one({"user": user, "date": today, "status": "Approved"}):
-        st.error("On approved leave")
-        st.stop()
-
     tasks = list(tasks_col.find({"assigned_to": user}))
-    if not tasks:
-        st.warning("No tasks assigned")
-        st.stop()
 
     task_map = {t["title"]: t for t in tasks}
     task = st.selectbox("Task", task_map.keys())
-    task_doc = task_map[task]
 
-    st.info(f"{task_doc['start_date']} → {task_doc['end_date']} | Status: {task_doc['status']}")
+    activity = st.selectbox("Activity", ["Task Work", "Call", "Meeting", "Other"])
+    details = st.text_area("Details")
 
-    activity_type = st.selectbox("Activity Type", ["Task Work", "Call", "Meeting", "Other"])
-    new_status = st.selectbox("Update Task Status (optional)", ["No Change"] + TASK_STATUS)
-
-    log = {
-        "date": today,
-        "user": user,
-        "task": task,
-        "activity_type": activity_type
-    }
-
-    if activity_type == "Task Work":
-        log["details"] = st.text_area("Work Done *")
-
-    elif activity_type == "Call":
-        log["called_person_name"] = st.text_input("Person Called *")
-        log["call_with"] = st.selectbox("Call With", CALL_WITH)
-        log["state"] = st.text_input("State")
-        log["details"] = st.text_area("Call Notes *")
-
-    elif activity_type == "Meeting":
-        log["meeting_with"] = st.selectbox("Meeting With", MEETING_WITH)
-        log["mode"] = st.selectbox("Mode", ["Online", "Offline"])
-        log["state"] = st.text_input("State")
-        log["details"] = st.text_area("MOM *")
-
-    else:
-        log["work_category"] = st.selectbox("Work Category", OTHER_WORK_TYPES)
-        log["state"] = st.text_input("State")
-        log["details"] = st.text_area("Description *")
+    new_status = st.selectbox("Update Status", ["No Change"] + TASK_STATUS)
 
     if st.button("Submit Log"):
-        if not log.get("details"):
-            st.error("Details required")
-        else:
-            if new_status != "No Change":
-                tasks_col.update_one(
-                    {"title": task},
-                    {"$set": {"status": new_status}}
-                )
-                log["updated_task_status"] = new_status
+        log = {
+            "date": today,
+            "user": user,
+            "task": task,
+            "activity_type": activity,
+            "details": details
+        }
 
-            logs_col.insert_one(log)
-            st.success("Work logged")
+        if new_status != "No Change":
+            tasks_col.update_one({"title": task}, {"$set": {"status": new_status}})
+            log["updated_task_status"] = new_status
+
+        logs_col.insert_one(log)
+
+        reporters = task_map[task]["reporting_ncs"]
+
+        send_email(
+            to=[NC_EMAILS[n] for n in reporters],
+            cc=MGMT_EMAILS[user],
+            subject=f"[Daily Update][{user}] {task}",
+            body=f"""
+User: {user}
+Task: {task}
+Activity: {activity}
+
+Details:
+{details}
+
+Status Update:
+{new_status}
+"""
+        )
+
+        st.success("Log saved & email sent")
 
 # =====================================================
 # LEAVE
 # =====================================================
 elif menu == "Leave":
-    st.header("🌴 Leave")
 
     if role == "Management":
         leave_type = st.selectbox("Leave Type", LEAVE_TYPES.keys())
-        leave_date = st.date_input("Leave Date", min_value=date.today())
-        reason = st.text_area("Reason *")
-
-        used = leaves_col.count_documents({
-            "user": user,
-            "leave_type": leave_type,
-            "status": "Approved"
-        })
-
-        if used >= LEAVE_TYPES[leave_type]:
-            st.error("Leave exhausted")
+        leave_date = st.date_input("Leave Date")
+        reason = st.text_area("Reason")
 
         if st.button("Apply Leave"):
             leaves_col.insert_one({
@@ -306,25 +270,25 @@ elif menu == "Leave":
                 "reason": reason,
                 "status": "Pending"
             })
-            st.success("Leave applied")
+
+            send_email(
+                to=list(NC_EMAILS.values()),
+                cc=MGMT_EMAILS[user],
+                subject=f"[Leave Request] {user} | {leave_type} | {leave_date}",
+                body=reason
+            )
+
+            st.success("Leave applied & email sent")
 
     else:
         pending = list(leaves_col.find({"status": "Pending"}))
-        if not pending:
-            st.info("No pending leaves")
-
-        for i, l in enumerate(pending):
-            with st.expander(f"{l['user']} – {l['leave_type']} – {l['date']}"):
-                if st.button("Approve", key=f"a{i}"):
-                    leaves_col.update_one(
-                        {"_id": l["_id"]},
-                        {"$set": {"status": "Approved"}}
+        for l in pending:
+            with st.expander(f"{l['user']} | {l['leave_type']} | {l['date']}"):
+                if st.button("Approve", key=l["_id"]):
+                    leaves_col.update_one({"_id": l["_id"]}, {"$set": {"status": "Approved"}})
+                    send_email(
+                        to=MGMT_EMAILS[l["user"]],
+                        cc=list(NC_EMAILS.values()),
+                        subject=f"[Leave Approved] {l['leave_type']} | {l['date']}",
+                        body="Approved"
                     )
-                    st.success("Approved")
-
-                if st.button("Reject", key=f"r{i}"):
-                    leaves_col.update_one(
-                        {"_id": l["_id"]},
-                        {"$set": {"status": "Rejected"}}
-                    )
-                    st.warning("Rejected")
