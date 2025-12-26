@@ -4,7 +4,7 @@ from datetime import date
 from pymongo import MongoClient
 
 from langchain_groq import ChatGroq
-from langchain.prompts import PromptTemplate
+from langchain_core.prompts import PromptTemplate
 from langchain.chains import LLMChain
 
 # =====================================================
