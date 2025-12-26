@@ -6,3 +6,4 @@ dnspython>=2.4.0
 langchain
 langchain-groq
 langchain-core
+yagmail
