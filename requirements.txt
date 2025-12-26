@@ -5,4 +5,4 @@ pandas>=2.0.0
 dnspython>=2.4.0
 langchain
 langchain-groq
-
+langchain-core
