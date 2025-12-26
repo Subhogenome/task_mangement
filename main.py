@@ -63,7 +63,8 @@ if menu == "Dashboard":
     if role == "NC":
         st.subheader("All Tasks")
         if st.session_state.tasks:
-            st.dataframe(pd.DataFrame(st.session_state.tasks))
+            df = pd.DataFrame(st.session_state.tasks)
+            st.dataframe(df)
         else:
             st.info("No tasks created yet")
 
@@ -85,13 +86,19 @@ if menu == "Dashboard":
             st.info("No tasks assigned to you yet")
 
 # =====================================================
-# CREATE TASK
+# CREATE TASK (WITH DATES)
 # =====================================================
 elif menu == "Create Task":
     st.header("📝 Create Task")
 
-    title = st.text_input("Task Title")
-    desc = st.text_area("Task Description")
+    title = st.text_input("Task Title *")
+    desc = st.text_area("Task Description *")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        start_date = st.date_input("Start Date *", min_value=date.today())
+    with col2:
+        end_date = st.date_input("End Date *", min_value=start_date)
 
     if role == "NC":
         assigned_to = st.selectbox("Assign to Management", MANAGEMENT)
@@ -108,8 +115,8 @@ elif menu == "Create Task":
         )
 
     if st.button("Create Task"):
-        if not title or not desc:
-            st.error("Title and description are mandatory")
+        if not title or not desc or not reporting_ncs:
+            st.error("All fields are mandatory")
         else:
             task = {
                 "task_id": len(st.session_state.tasks) + 1,
@@ -117,13 +124,15 @@ elif menu == "Create Task":
                 "description": desc,
                 "assigned_to": assigned_to,
                 "reporting_ncs": ", ".join(reporting_ncs),
+                "start_date": str(start_date),
+                "end_date": str(end_date),
                 "status": "To Do"
             }
             st.session_state.tasks.append(task)
             st.success("Task created successfully")
 
 # =====================================================
-# DAILY WORK LOG (MANAGEMENT ONLY)
+# DAILY WORK LOG
 # =====================================================
 elif menu == "Daily Work Log":
     st.header("📅 Daily Work Log")
@@ -144,6 +153,13 @@ elif menu == "Daily Work Log":
     task_titles = {t["title"]: t for t in my_tasks}
     selected_task = st.selectbox("Select Task", task_titles.keys())
 
+    # Show task timeline context
+    st.info(
+        f"🗓️ Task Timeline: "
+        f"{task_titles[selected_task]['start_date']} → "
+        f"{task_titles[selected_task]['end_date']}"
+    )
+
     activity_type = st.selectbox(
         "Activity Type",
         ["Task Work", "Call", "Meeting", "Other"]
@@ -156,7 +172,6 @@ elif menu == "Daily Work Log":
         "activity_type": activity_type
     }
 
-    # ---------------- TASK WORK ----------------
     if activity_type == "Task Work":
         status = st.selectbox("Task Status", TASK_STATUS)
         work = st.text_area("Work Done")
@@ -164,7 +179,6 @@ elif menu == "Daily Work Log":
         log["details"] = work
         task_titles[selected_task]["status"] = status
 
-    # ---------------- CALL ----------------
     elif activity_type == "Call":
         call_with = st.selectbox("Call With", CALL_WITH)
         state = st.text_input("State")
@@ -173,7 +187,6 @@ elif menu == "Daily Work Log":
         log["state"] = state
         log["details"] = notes
 
-    # ---------------- MEETING ----------------
     elif activity_type == "Meeting":
         meet_with = st.selectbox("Meeting With", MEETING_WITH)
         mode = st.selectbox("Mode", ["Online", "Offline"])
@@ -184,7 +197,6 @@ elif menu == "Daily Work Log":
         log["state"] = state
         log["details"] = mom
 
-    # ---------------- OTHER ----------------
     elif activity_type == "Other":
         work_type = st.selectbox("Work Category", OTHER_WORK_TYPES)
         state = st.text_input("State (if applicable)")
