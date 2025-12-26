@@ -11,7 +11,7 @@ from langchain_core.prompts import PromptTemplate
 # =====================================================
 # DB
 # =====================================================
-client = MongoClient(st.secrets["mongo"]["uri"])
+client = MongoClient(st.secrets["mongo"])
 db = client["nc_ops"]
 
 users_col = db.users
@@ -37,8 +37,8 @@ MGMT_EMAILS = {
 OFFICIAL_NC_EMAIL = "aolsm.nc@srisripublications.com"
 
 yag = yagmail.SMTP(
-    st.secrets["email"]["user"],
-    st.secrets["email"]["password"]
+    st.secrets["user"],
+    st.secrets["password"]
 )
 
 def send_email(to, subject, body, cc=None):
