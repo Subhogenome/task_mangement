@@ -48,7 +48,7 @@ def send_email(to, subject, body, cc=None):
 # LLM (ChatGroq)
 # =====================================================
 llm = ChatGroq(
-    api_key=st.secrets["groq"]["api_key"],
+    api_key=st.secrets["api_key"],
     model="llama3-70b-8192",
     temperature=0.2
 )
