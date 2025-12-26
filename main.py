@@ -10,6 +10,15 @@ MANAGEMENT = ["Akshay", "Vatsal", "Narendra"]
 
 CALL_WITH = ["NC", "SC", "AC", "DC", "Other"]
 MEETING_WITH = ["NC", "SC", "AC", "DC"]
+OTHER_WORK_TYPES = [
+    "Documentation",
+    "Coordination",
+    "Planning",
+    "Review",
+    "Content Creation",
+    "Other"
+]
+
 TASK_STATUS = ["To Do", "Running", "Done"]
 
 # =====================================================
@@ -137,7 +146,7 @@ elif menu == "Daily Work Log":
 
     activity_type = st.selectbox(
         "Activity Type",
-        ["Task Work", "Call", "Meeting"]
+        ["Task Work", "Call", "Meeting", "Other"]
     )
 
     log = {
@@ -147,15 +156,15 @@ elif menu == "Daily Work Log":
         "activity_type": activity_type
     }
 
+    # ---------------- TASK WORK ----------------
     if activity_type == "Task Work":
         status = st.selectbox("Task Status", TASK_STATUS)
         work = st.text_area("Work Done")
         log["status"] = status
         log["details"] = work
-
-        # Auto update task status
         task_titles[selected_task]["status"] = status
 
+    # ---------------- CALL ----------------
     elif activity_type == "Call":
         call_with = st.selectbox("Call With", CALL_WITH)
         state = st.text_input("State")
@@ -164,6 +173,7 @@ elif menu == "Daily Work Log":
         log["state"] = state
         log["details"] = notes
 
+    # ---------------- MEETING ----------------
     elif activity_type == "Meeting":
         meet_with = st.selectbox("Meeting With", MEETING_WITH)
         mode = st.selectbox("Mode", ["Online", "Offline"])
@@ -173,6 +183,15 @@ elif menu == "Daily Work Log":
         log["mode"] = mode
         log["state"] = state
         log["details"] = mom
+
+    # ---------------- OTHER ----------------
+    elif activity_type == "Other":
+        work_type = st.selectbox("Work Category", OTHER_WORK_TYPES)
+        state = st.text_input("State (if applicable)")
+        desc = st.text_area("Work Description")
+        log["work_category"] = work_type
+        log["state"] = state
+        log["details"] = desc
 
     if st.button("Submit Daily Log"):
         st.session_state.logs.append(log)
