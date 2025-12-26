@@ -35,7 +35,7 @@ LEAVE_TYPES = {"CL": 15, "SL": 7, "COURSE": 7}
 # =====================================================
 # DB
 # =====================================================
-client = MongoClient(st.secrets["mongo"]["uri"])
+client = MongoClient(st.secrets["mongo"])
 db = client["nc_ops"]
 
 tasks_col = db.tasks
@@ -46,8 +46,8 @@ leaves_col = db.leaves
 # EMAIL (YAGMAIL)
 # =====================================================
 yag = yagmail.SMTP(
-    user=st.secrets["email"]["user"],
-    password=st.secrets["email"]["password"]
+    user=st.secrets["user"],
+    password=st.secrets["password"]
 )
 
 def send_email(to, subject, body, cc=None):
@@ -57,7 +57,7 @@ def send_email(to, subject, body, cc=None):
 # LLM (ChatGroq – LCEL)
 # =====================================================
 llm = ChatGroq(
-    api_key=st.secrets["groq"]["api_key"],
+    api_key=st.secrets["api_key"],
     model="llama3-70b-8192",
     temperature=0.2
 )
