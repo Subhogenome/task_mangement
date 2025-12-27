@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pymongo import MongoClient
 import bcrypt
 import yagmail
@@ -17,6 +17,9 @@ def key_to_name(key: str) -> str:
 def name_to_key(name: str) -> str:
     return name.replace(" ", "_")
 
+def utc_now():
+    return datetime.now(timezone.utc)
+
 # =====================================================
 # DB
 # =====================================================
@@ -26,7 +29,7 @@ db = client["nc_ops"]
 users_col = db.users
 tasks_col = db.tasks
 logs_col = db.work_logs
-leave_requests_col = db.leave_requests   # ✅ FIXED
+leave_requests_col = db.leave_requests
 
 # =====================================================
 # EMAIL
@@ -101,7 +104,7 @@ if not st.session_state.user:
             p2 = st.text_input("Confirm Password", type="password")
 
             if st.button("Set Password"):
-                if p1 != p2 or not p1:
+                if not p1 or p1 != p2:
                     st.error("Passwords do not match")
                 else:
                     users_col.update_one(
@@ -109,7 +112,7 @@ if not st.session_state.user:
                         {"$set": {
                             "password_hash": hash_pw(p1),
                             "first_login": False,
-                            "updated_at": datetime.utcnow()
+                            "updated_at": utc_now()
                         }}
                     )
                     st.success("Password set. Please login again.")
@@ -158,17 +161,26 @@ if menu == "Dashboard":
 
     if role == "nc":
         st.subheader("📋 All Tasks")
-        st.dataframe(pd.DataFrame(list(tasks_col.find({}, {"_id": 0})))) \
-            if tasks_col.count_documents({}) else st.info("No tasks")
+        tasks = list(tasks_col.find({}, {"_id": 0}))
+        if tasks:
+            st.dataframe(pd.DataFrame(tasks))
+        else:
+            st.info("No tasks")
 
         st.subheader("📌 Daily Work Logs")
-        st.dataframe(pd.DataFrame(list(logs_col.find({}, {"_id": 0})))) \
-            if logs_col.count_documents({}) else st.info("No logs")
+        logs = list(logs_col.find({}, {"_id": 0}))
+        if logs:
+            st.dataframe(pd.DataFrame(logs))
+        else:
+            st.info("No logs")
 
     else:
         st.subheader("📋 My Tasks")
         my_tasks = list(tasks_col.find({"assigned_to_email": user_email}, {"_id": 0}))
-        st.dataframe(pd.DataFrame(my_tasks)) if my_tasks else st.info("No tasks assigned")
+        if my_tasks:
+            st.dataframe(pd.DataFrame(my_tasks))
+        else:
+            st.info("No tasks assigned")
 
 # =====================================================
 # CREATE TASK
@@ -185,6 +197,7 @@ elif menu == "Create Task":
         assignee_key = st.selectbox("Assign To", list(MGMT_EMAILS.keys()))
         assigned_email = MGMT_EMAILS[assignee_key]
         assigned_name = key_to_name(assignee_key)
+
         reporters = st.multiselect(
             "Reporting NCs",
             list(NC_EMAILS.keys()),
@@ -245,11 +258,14 @@ elif menu == "Daily Work Log":
             "task_title": task_title,
             "details": details,
             "updated_status": new_status,
-            "created_at": datetime.utcnow()
+            "created_at": utc_now()
         })
 
         if new_status != "No Change":
-            tasks_col.update_one({"title": task_title}, {"$set": {"status": new_status}})
+            tasks_col.update_one(
+                {"title": task_title},
+                {"$set": {"status": new_status}}
+            )
 
         send_email(
             to=task_map[task_title]["reporting_nc_emails"],
@@ -266,7 +282,6 @@ elif menu == "Daily Work Log":
 elif menu == "Leave":
     st.header("🌴 Leave")
 
-    # -------- MANAGEMENT --------
     if role == "management":
         leave_type = st.selectbox("Leave Type", ["CL", "SL", "COURSE"])
         leave_date = st.date_input("Leave Date")
@@ -280,7 +295,7 @@ elif menu == "Leave":
                 "date": str(leave_date),
                 "reason": reason,
                 "status": "Pending",
-                "applied_at": datetime.utcnow()
+                "applied_at": utc_now()
             })
 
             send_email(
@@ -292,10 +307,8 @@ elif menu == "Leave":
 
             st.success("Leave applied")
 
-    # -------- NC REVIEW --------
     else:
         st.subheader("📥 Pending Leave Requests")
-
         pending = list(leave_requests_col.find({"status": "Pending"}))
 
         if not pending:
@@ -315,7 +328,7 @@ elif menu == "Leave":
                             {"$set": {
                                 "status": "Approved",
                                 "reviewed_by": user_name,
-                                "reviewed_at": datetime.utcnow()
+                                "reviewed_at": utc_now()
                             }}
                         )
                         send_email(
@@ -327,17 +340,14 @@ elif menu == "Leave":
                         st.rerun()
 
                 with col2:
-                    reject_reason = st.text_input(
-                        "Reject reason",
-                        key=f"r_{leave['_id']}"
-                    )
+                    reject_reason = st.text_input("Reject reason", key=f"r_{leave['_id']}")
                     if st.button("Reject", key=f"rej_{leave['_id']}"):
                         leave_requests_col.update_one(
                             {"_id": leave["_id"]},
                             {"$set": {
                                 "status": "Rejected",
                                 "reviewed_by": user_name,
-                                "reviewed_at": datetime.utcnow(),
+                                "reviewed_at": utc_now(),
                                 "rejection_reason": reject_reason
                             }}
                         )
