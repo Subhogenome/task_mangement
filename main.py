@@ -11,14 +11,14 @@ from langchain_core.prompts import PromptTemplate
 # =====================================================
 # HELPERS
 # =====================================================
+def utc_now():
+    return datetime.now(timezone.utc)
+
 def key_to_name(key: str) -> str:
     return key.replace("_", " ")
 
 def name_to_key(name: str) -> str:
     return name.replace(" ", "_")
-
-def utc_now():
-    return datetime.now(timezone.utc)
 
 # =====================================================
 # DB
@@ -50,7 +50,7 @@ def send_email(to, subject, body, cc=None):
         st.warning("⚠️ Email could not be sent")
 
 # =====================================================
-# LLM
+# LLM (ChatGroq)
 # =====================================================
 llm = ChatGroq(
     api_key=st.secrets["api_key"],
@@ -59,13 +59,15 @@ llm = ChatGroq(
 )
 
 summary_prompt = PromptTemplate.from_template("""
+You are a National Coordinator.
+
 Summarize today's work for {name}.
 
-Cover:
-- Tasks
+Include:
+- Tasks worked on
 - Calls / meetings
-- Status changes
-- Risks
+- Status updates
+- Risks / follow-ups
 
 Logs:
 {logs}
@@ -74,7 +76,7 @@ Logs:
 summary_chain = summary_prompt | llm
 
 # =====================================================
-# AUTH HELPERS
+# AUTH
 # =====================================================
 def hash_pw(pw):
     return bcrypt.hashpw(pw.encode(), bcrypt.gensalt())
@@ -86,7 +88,7 @@ if "user" not in st.session_state:
     st.session_state.user = None
 
 # =====================================================
-# LOGIN
+# LOGIN / FIRST LOGIN
 # =====================================================
 if not st.session_state.user:
     st.title("🔐 Login")
@@ -115,7 +117,7 @@ if not st.session_state.user:
                             "updated_at": utc_now()
                         }}
                     )
-                    st.success("Password set. Please login again.")
+                    st.success("Password set. Login again.")
                     st.stop()
         else:
             pwd = st.text_input("Password", type="password")
@@ -141,16 +143,15 @@ user_name = current_user["name"]
 role = current_user["role"]
 user_key = name_to_key(user_name)
 
-st.sidebar.markdown(
-    f"**Logged in as**  \n{user_name}  \n({user_email})"
-)
+st.sidebar.markdown(f"**{user_name}**  \n{user_email}")
 
 if st.sidebar.button("Logout"):
     st.session_state.user = None
     st.rerun()
 
 menu = st.sidebar.radio(
-    "Menu", ["Dashboard", "Create Task", "Daily Work Log", "Leave"]
+    "Menu",
+    ["Dashboard", "Create Task", "Daily Work Log", "Leave"]
 )
 
 # =====================================================
@@ -162,25 +163,65 @@ if menu == "Dashboard":
     if role == "nc":
         st.subheader("📋 All Tasks")
         tasks = list(tasks_col.find({}, {"_id": 0}))
-        if tasks:
-            st.dataframe(pd.DataFrame(tasks))
-        else:
-            st.info("No tasks")
+        st.dataframe(pd.DataFrame(tasks)) if tasks else st.info("No tasks")
 
         st.subheader("📌 Daily Work Logs")
         logs = list(logs_col.find({}, {"_id": 0}))
-        if logs:
-            st.dataframe(pd.DataFrame(logs))
-        else:
-            st.info("No logs")
+        st.dataframe(pd.DataFrame(logs)) if logs else st.info("No logs")
+
+        # ---------------- AI SUMMARY ----------------
+        st.divider()
+        st.subheader("🧠 AI Daily Work Summary")
+
+        review_date = st.date_input("Select date", date.today())
+
+        if st.button("Generate & Send AI Summary"):
+            day_str = str(review_date)
+            day_logs = list(logs_col.find({"date": day_str}, {"_id": 0}))
+
+            if not day_logs:
+                st.warning("No logs for selected date")
+                st.stop()
+
+            df = pd.DataFrame(day_logs)
+            consolidated = []
+
+            for key, mgmt_email in MGMT_EMAILS.items():
+                name = key_to_name(key)
+                user_logs = df[df["user_email"] == mgmt_email]
+
+                if user_logs.empty:
+                    continue
+
+                summary = summary_chain.invoke({
+                    "name": name,
+                    "logs": user_logs.to_dict(orient="records")
+                }).content
+
+                send_email(
+                    to=mgmt_email,
+                    subject=f"[AI Summary] {name} – {day_str}",
+                    body=summary,
+                    cc=OFFICIAL_NC_EMAIL
+                )
+
+                consolidated.append(f"### {name}\n{summary}")
+
+            if consolidated:
+                send_email(
+                    to=list(NC_EMAILS.values()),
+                    subject=f"[Consolidated AI Ops Summary] {day_str}",
+                    body="\n\n".join(consolidated),
+                    cc=OFFICIAL_NC_EMAIL
+                )
+                st.success("AI summaries sent")
+            else:
+                st.info("Nothing to summarize")
 
     else:
         st.subheader("📋 My Tasks")
         my_tasks = list(tasks_col.find({"assigned_to_email": user_email}, {"_id": 0}))
-        if my_tasks:
-            st.dataframe(pd.DataFrame(my_tasks))
-        else:
-            st.info("No tasks assigned")
+        st.dataframe(pd.DataFrame(my_tasks)) if my_tasks else st.info("No tasks assigned")
 
 # =====================================================
 # CREATE TASK
@@ -188,7 +229,7 @@ if menu == "Dashboard":
 elif menu == "Create Task":
     st.header("📝 Create Task")
 
-    title = st.text_input("Task Title")
+    title = st.text_input("Title")
     desc = st.text_area("Description")
     start = st.date_input("Start Date")
     end = st.date_input("End Date")
@@ -197,7 +238,6 @@ elif menu == "Create Task":
         assignee_key = st.selectbox("Assign To", list(MGMT_EMAILS.keys()))
         assigned_email = MGMT_EMAILS[assignee_key]
         assigned_name = key_to_name(assignee_key)
-
         reporters = st.multiselect(
             "Reporting NCs",
             list(NC_EMAILS.keys()),
@@ -277,7 +317,7 @@ elif menu == "Daily Work Log":
         st.success("Work logged")
 
 # =====================================================
-# LEAVE (MANAGEMENT + NC REVIEW)
+# LEAVE
 # =====================================================
 elif menu == "Leave":
     st.header("🌴 Leave")
@@ -300,7 +340,7 @@ elif menu == "Leave":
 
             send_email(
                 to=list(NC_EMAILS.values()),
-                subject=f"[Leave Request] {user_name} | {leave_type}",
+                subject=f"[Leave Request] {user_name}",
                 body=reason,
                 cc=user_email
             )
@@ -312,7 +352,7 @@ elif menu == "Leave":
         pending = list(leave_requests_col.find({"status": "Pending"}))
 
         if not pending:
-            st.info("No pending leave requests")
+            st.info("No pending leaves")
             st.stop()
 
         for leave in pending:
