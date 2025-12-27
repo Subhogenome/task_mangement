@@ -26,7 +26,7 @@ db = client["nc_ops"]
 users_col = db.users
 tasks_col = db.tasks
 logs_col = db.work_logs
-leaves_col = db.leaves
+leave_requests_col = db.leave_requests   # ✅ FIXED
 
 # =====================================================
 # EMAIL
@@ -44,7 +44,7 @@ def send_email(to, subject, body, cc=None):
     try:
         yag.send(to=to, subject=subject, contents=body, cc=cc)
     except Exception:
-        st.warning("⚠️ Email could not be sent (check SMTP settings)")
+        st.warning("⚠️ Email could not be sent")
 
 # =====================================================
 # LLM
@@ -266,13 +266,14 @@ elif menu == "Daily Work Log":
 elif menu == "Leave":
     st.header("🌴 Leave")
 
+    # -------- MANAGEMENT --------
     if role == "management":
         leave_type = st.selectbox("Leave Type", ["CL", "SL", "COURSE"])
         leave_date = st.date_input("Leave Date")
         reason = st.text_area("Reason")
 
         if st.button("Apply Leave"):
-            leaves_col.insert_one({
+            leave_requests_col.insert_one({
                 "user_email": user_email,
                 "user_name": user_name,
                 "leave_type": leave_type,
@@ -284,19 +285,21 @@ elif menu == "Leave":
 
             send_email(
                 to=list(NC_EMAILS.values()),
-                subject=f"[Leave Request] {user_name}",
+                subject=f"[Leave Request] {user_name} | {leave_type}",
                 body=reason,
                 cc=user_email
             )
 
             st.success("Leave applied")
 
+    # -------- NC REVIEW --------
     else:
         st.subheader("📥 Pending Leave Requests")
-        pending = list(leaves_col.find({"status": "Pending"}))
+
+        pending = list(leave_requests_col.find({"status": "Pending"}))
 
         if not pending:
-            st.info("No pending leaves")
+            st.info("No pending leave requests")
             st.stop()
 
         for leave in pending:
@@ -307,7 +310,7 @@ elif menu == "Leave":
 
                 with col1:
                     if st.button("Approve", key=f"a_{leave['_id']}"):
-                        leaves_col.update_one(
+                        leave_requests_col.update_one(
                             {"_id": leave["_id"]},
                             {"$set": {
                                 "status": "Approved",
@@ -324,21 +327,24 @@ elif menu == "Leave":
                         st.rerun()
 
                 with col2:
-                    reason_reject = st.text_input("Reject reason", key=f"r_{leave['_id']}")
+                    reject_reason = st.text_input(
+                        "Reject reason",
+                        key=f"r_{leave['_id']}"
+                    )
                     if st.button("Reject", key=f"rej_{leave['_id']}"):
-                        leaves_col.update_one(
+                        leave_requests_col.update_one(
                             {"_id": leave["_id"]},
                             {"$set": {
                                 "status": "Rejected",
                                 "reviewed_by": user_name,
                                 "reviewed_at": datetime.utcnow(),
-                                "rejection_reason": reason_reject
+                                "rejection_reason": reject_reason
                             }}
                         )
                         send_email(
                             to=leave["user_email"],
                             subject="[Leave Rejected]",
-                            body=reason_reject,
+                            body=reject_reason,
                             cc=list(NC_EMAILS.values())
                         )
                         st.rerun()
