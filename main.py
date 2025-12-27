@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from pymongo import MongoClient
 import bcrypt
 import yagmail
@@ -91,7 +91,7 @@ if "user" not in st.session_state:
     st.session_state.user = None
 
 # =====================================================
-# LOGIN / FIRST LOGIN
+# LOGIN
 # =====================================================
 if not st.session_state.user:
     st.title("🔐 Login")
@@ -147,7 +147,9 @@ name = user["name"]
 role = user["role"]
 user_key = name_to_key(name)
 
-st.sidebar.markdown(f"**{name}**  \n{email}  \nRole: `{role}`")
+st.sidebar.markdown(
+    f"**{name}**  \n{email}  \nRole: `{role}`"
+)
 
 if st.sidebar.button("Logout"):
     st.session_state.user = None
@@ -164,7 +166,7 @@ menu = st.sidebar.radio(
 if menu == "Dashboard":
     st.header("📊 Dashboard")
 
-    # ================= NC DASHBOARD =================
+    # ---------------- NC DASHBOARD ----------------
     if role == "nc":
         st.subheader("🧠 AI Daily Summary")
 
@@ -181,23 +183,19 @@ if menu == "Dashboard":
                 consolidated = []
 
                 for key, mgmt_email in MGMT_EMAILS.items():
-                    mgmt_logs = df[df["user_email"] == mgmt_email]
-
-                    if mgmt_logs.empty:
+                    user_logs = df[df["user_email"] == mgmt_email]
+                    if user_logs.empty:
                         continue
 
                     mgmt_name = key_to_name(key)
-
                     summary = summary_chain.invoke({
                         "name": mgmt_name,
-                        "logs": mgmt_logs.to_dict(orient="records")
+                        "logs": user_logs.to_dict(orient="records")
                     }).content
 
-                    # SHOW ON SCREEN
                     st.markdown(f"### {mgmt_name}")
                     st.write(summary)
 
-                    # EMAIL INDIVIDUAL
                     send_email(
                         to=mgmt_email,
                         subject=f"[AI Daily Summary] {mgmt_name} – {day_str}",
@@ -207,7 +205,6 @@ if menu == "Dashboard":
 
                     consolidated.append(f"{mgmt_name}\n{summary}")
 
-                # EMAIL CONSOLIDATED TO NCS
                 if consolidated:
                     send_email(
                         to=list(NC_EMAILS.values()),
@@ -219,17 +216,26 @@ if menu == "Dashboard":
         st.divider()
         st.subheader("📋 All Tasks")
         tasks = list(tasks_col.find({}, {"_id": 0}))
-        st.dataframe(pd.DataFrame(tasks)) if tasks else st.info("No tasks")
+        if tasks:
+            st.dataframe(pd.DataFrame(tasks))
+        else:
+            st.info("No tasks")
 
         st.subheader("📌 All Work Logs")
         logs = list(logs_col.find({}, {"_id": 0}))
-        st.dataframe(pd.DataFrame(logs)) if logs else st.info("No logs")
+        if logs:
+            st.dataframe(pd.DataFrame(logs))
+        else:
+            st.info("No logs")
 
-    # ================= MANAGEMENT DASHBOARD =================
+    # ---------------- MANAGEMENT DASHBOARD ----------------
     else:
         st.subheader("📋 My Tasks")
         my_tasks = list(tasks_col.find({"assigned_to_email": email}, {"_id": 0}))
-        st.dataframe(pd.DataFrame(my_tasks)) if my_tasks else st.info("No tasks assigned")
+        if my_tasks:
+            st.dataframe(pd.DataFrame(my_tasks))
+        else:
+            st.info("No tasks assigned")
 
 # =====================================================
 # CREATE TASK
@@ -279,13 +285,13 @@ elif menu == "Daily Work Log":
         st.stop()
 
     tasks = list(tasks_col.find({"assigned_to_email": email}))
-    task_titles = [t["title"] for t in tasks]
+    titles = [t["title"] for t in tasks]
 
-    if not task_titles:
+    if not titles:
         st.info("No tasks assigned")
         st.stop()
 
-    task = st.selectbox("Task", task_titles)
+    task = st.selectbox("Task", titles)
     details = st.text_area("Work Done")
     status = st.selectbox("Status", ["To Do", "Running", "Done"])
 
@@ -299,12 +305,11 @@ elif menu == "Daily Work Log":
             "status": status,
             "created_at": utc_now()
         })
-
         tasks_col.update_one({"title": task}, {"$set": {"status": status}})
         st.success("Work logged")
 
 # =====================================================
-# LEAVE (MULTI-DAY + WFH)
+# LEAVE / WFH
 # =====================================================
 elif menu == "Leave":
     st.header("🌴 Leave / WFH")
@@ -317,10 +322,10 @@ elif menu == "Leave":
         )
         start = st.date_input("From Date")
         end = st.date_input("To Date")
-        total_days = days_between(start, end)
+        days = days_between(start, end)
         reason = st.text_area("Reason")
 
-        st.info(f"Total Days: {total_days}")
+        st.info(f"Total Days: {days}")
 
         if st.button("Apply"):
             leave_requests_col.insert_one({
@@ -330,7 +335,7 @@ elif menu == "Leave":
                 "leave_type": leave_type,
                 "from_date": str(start),
                 "to_date": str(end),
-                "days": total_days,
+                "days": days,
                 "reason": reason,
                 "status": "Pending",
                 "applied_at": utc_now()
@@ -344,6 +349,8 @@ elif menu == "Leave":
         if not pending:
             st.info("No pending requests")
         else:
-            for l in pending:
-                with st.expander(f"{l['user_name']} | {l['mode']} | {l['days']} days"):
-                    st.write(l)
+            for req in pending:
+                with st.expander(
+                    f"{req['user_name']} | {req['mode']} | {req['days']} days"
+                ):
+                    st.write(req)
