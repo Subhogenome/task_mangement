@@ -9,7 +9,7 @@ from langchain_groq import ChatGroq
 from langchain_core.prompts import PromptTemplate
 
 # =====================================================
-# HELPERS FOR NAME <-> KEY
+# HELPERS
 # =====================================================
 def key_to_name(key: str) -> str:
     return key.replace("_", " ")
@@ -29,11 +29,10 @@ logs_col = db.work_logs
 leaves_col = db.leaves
 
 # =====================================================
-# EMAIL CONFIG
+# EMAIL
 # =====================================================
-NC_EMAILS = dict(st.secrets["nc_emails"])        # key -> email
-MGMT_EMAILS = dict(st.secrets["mgmt_emails"])    # key -> email
-
+NC_EMAILS = dict(st.secrets["nc_emails"])
+MGMT_EMAILS = dict(st.secrets["mgmt_emails"])
 OFFICIAL_NC_EMAIL = st.secrets["of_email"]
 
 yag = yagmail.SMTP(
@@ -42,10 +41,13 @@ yag = yagmail.SMTP(
 )
 
 def send_email(to, subject, body, cc=None):
-    yag.send(to=to, subject=subject, contents=body, cc=cc)
+    try:
+        yag.send(to=to, subject=subject, contents=body, cc=cc)
+    except Exception:
+        st.warning("⚠️ Email could not be sent (check SMTP settings)")
 
 # =====================================================
-# LLM (ChatGroq – LCEL)
+# LLM
 # =====================================================
 llm = ChatGroq(
     api_key=st.secrets["api_key"],
@@ -54,20 +56,16 @@ llm = ChatGroq(
 )
 
 summary_prompt = PromptTemplate.from_template("""
-You are a National Coordinator reviewing daily work.
+Summarize today's work for {name}.
 
-Summarize the work done today by {name}.
-
-Focus on:
-- Tasks worked on
+Cover:
+- Tasks
 - Calls / meetings
 - Status changes
-- Risks or follow-ups
+- Risks
 
 Logs:
 {logs}
-
-Return concise bullet points.
 """)
 
 summary_chain = summary_prompt | llm
@@ -85,7 +83,7 @@ if "user" not in st.session_state:
     st.session_state.user = None
 
 # =====================================================
-# LOGIN / FIRST LOGIN
+# LOGIN
 # =====================================================
 if not st.session_state.user:
     st.title("🔐 Login")
@@ -99,12 +97,11 @@ if not st.session_state.user:
 
     if user_doc:
         if user_doc["first_login"]:
-            st.subheader("Create Password")
-            p1 = st.text_input("Password", type="password")
+            p1 = st.text_input("Create Password", type="password")
             p2 = st.text_input("Confirm Password", type="password")
 
             if st.button("Set Password"):
-                if not p1 or p1 != p2:
+                if p1 != p2 or not p1:
                     st.error("Passwords do not match")
                 else:
                     users_col.update_one(
@@ -139,7 +136,6 @@ current_user = st.session_state.user
 user_email = current_user["email"]
 user_name = current_user["name"]
 role = current_user["role"]
-
 user_key = name_to_key(user_name)
 
 st.sidebar.markdown(
@@ -162,69 +158,17 @@ if menu == "Dashboard":
 
     if role == "nc":
         st.subheader("📋 All Tasks")
-        tasks = list(tasks_col.find({}, {"_id": 0}))
-        if tasks:
-            st.dataframe(pd.DataFrame(tasks))
-        else:
-            st.info("No tasks")
+        st.dataframe(pd.DataFrame(list(tasks_col.find({}, {"_id": 0})))) \
+            if tasks_col.count_documents({}) else st.info("No tasks")
 
         st.subheader("📌 Daily Work Logs")
-        logs = list(logs_col.find({}, {"_id": 0}))
-        if logs:
-            st.dataframe(pd.DataFrame(logs))
-        else:
-            st.info("No logs yet")
-
-        st.divider()
-        st.subheader("🧠 AI Daily Summary")
-
-        review_date = str(st.date_input("Review Date", date.today()))
-
-        if st.button("Generate & Email Summary"):
-            day_logs = list(logs_col.find({"date": review_date}, {"_id": 0}))
-            df = pd.DataFrame(day_logs)
-
-            summaries = []
-
-            for k, email in MGMT_EMAILS.items():
-                name = key_to_name(k)
-                mlogs = df[df["user_email"] == email]
-
-                if not mlogs.empty:
-                    summary = summary_chain.invoke({
-                        "name": name,
-                        "logs": mlogs.to_dict(orient="records")
-                    }).content
-
-                    send_email(
-                        to=email,
-                        subject=f"[Your Daily Summary] {review_date}",
-                        body=summary
-                    )
-
-                    summaries.append(f"{name}\n{summary}")
-
-            if summaries:
-                send_email(
-                    to=list(NC_EMAILS.values()),
-                    subject=f"[Daily Ops Summary] {review_date}",
-                    body="\n\n".join(summaries),
-                    cc=OFFICIAL_NC_EMAIL
-                )
-                st.success("Daily summaries emailed")
-            else:
-                st.info("No logs to summarize")
+        st.dataframe(pd.DataFrame(list(logs_col.find({}, {"_id": 0})))) \
+            if logs_col.count_documents({}) else st.info("No logs")
 
     else:
         st.subheader("📋 My Tasks")
-        my_tasks = list(tasks_col.find(
-            {"assigned_to_email": user_email},
-            {"_id": 0}
-        ))
-        if my_tasks:
-            st.dataframe(pd.DataFrame(my_tasks))
-        else:
-            st.info("No tasks assigned")
+        my_tasks = list(tasks_col.find({"assigned_to_email": user_email}, {"_id": 0}))
+        st.dataframe(pd.DataFrame(my_tasks)) if my_tasks else st.info("No tasks assigned")
 
 # =====================================================
 # CREATE TASK
@@ -241,7 +185,6 @@ elif menu == "Create Task":
         assignee_key = st.selectbox("Assign To", list(MGMT_EMAILS.keys()))
         assigned_email = MGMT_EMAILS[assignee_key]
         assigned_name = key_to_name(assignee_key)
-
         reporters = st.multiselect(
             "Reporting NCs",
             list(NC_EMAILS.keys()),
@@ -269,11 +212,11 @@ elif menu == "Create Task":
         send_email(
             to=assigned_email,
             subject=f"[Task Assigned] {title}",
-            body=f"{desc}\n\nStart: {start}\nEnd: {end}",
+            body=f"{desc}\nStart: {start}\nEnd: {end}",
             cc=[NC_EMAILS[k] for k in reporters]
         )
 
-        st.success("Task created & email sent")
+        st.success("Task created")
 
 # =====================================================
 # DAILY WORK LOG
@@ -283,7 +226,6 @@ elif menu == "Daily Work Log":
         st.stop()
 
     today = str(date.today())
-
     tasks = list(tasks_col.find({"assigned_to_email": user_email}))
     task_map = {t["title"]: t for t in tasks}
 
@@ -307,24 +249,19 @@ elif menu == "Daily Work Log":
         })
 
         if new_status != "No Change":
-            tasks_col.update_one(
-                {"title": task_title},
-                {"$set": {"status": new_status}}
-            )
-
-        reporters = task_map[task_title]["reporting_nc_emails"]
+            tasks_col.update_one({"title": task_title}, {"$set": {"status": new_status}})
 
         send_email(
-            to=reporters,
+            to=task_map[task_title]["reporting_nc_emails"],
             subject=f"[Daily Update] {user_name} | {task_title}",
             body=details,
             cc=user_email
         )
 
-        st.success("Work logged & email sent")
+        st.success("Work logged")
 
 # =====================================================
-# LEAVE
+# LEAVE (MANAGEMENT + NC REVIEW)
 # =====================================================
 elif menu == "Leave":
     st.header("🌴 Leave")
@@ -341,7 +278,8 @@ elif menu == "Leave":
                 "leave_type": leave_type,
                 "date": str(leave_date),
                 "reason": reason,
-                "status": "Pending"
+                "status": "Pending",
+                "applied_at": datetime.utcnow()
             })
 
             send_email(
@@ -351,4 +289,56 @@ elif menu == "Leave":
                 cc=user_email
             )
 
-            st.success("Leave applied & emailed")
+            st.success("Leave applied")
+
+    else:
+        st.subheader("📥 Pending Leave Requests")
+        pending = list(leaves_col.find({"status": "Pending"}))
+
+        if not pending:
+            st.info("No pending leaves")
+            st.stop()
+
+        for leave in pending:
+            with st.expander(f"{leave['user_name']} | {leave['leave_type']} | {leave['date']}"):
+                st.write(f"**Reason:** {leave['reason']}")
+
+                col1, col2 = st.columns(2)
+
+                with col1:
+                    if st.button("Approve", key=f"a_{leave['_id']}"):
+                        leaves_col.update_one(
+                            {"_id": leave["_id"]},
+                            {"$set": {
+                                "status": "Approved",
+                                "reviewed_by": user_name,
+                                "reviewed_at": datetime.utcnow()
+                            }}
+                        )
+                        send_email(
+                            to=leave["user_email"],
+                            subject="[Leave Approved]",
+                            body=f"Approved by {user_name}",
+                            cc=list(NC_EMAILS.values())
+                        )
+                        st.rerun()
+
+                with col2:
+                    reason_reject = st.text_input("Reject reason", key=f"r_{leave['_id']}")
+                    if st.button("Reject", key=f"rej_{leave['_id']}"):
+                        leaves_col.update_one(
+                            {"_id": leave["_id"]},
+                            {"$set": {
+                                "status": "Rejected",
+                                "reviewed_by": user_name,
+                                "reviewed_at": datetime.utcnow(),
+                                "rejection_reason": reason_reject
+                            }}
+                        )
+                        send_email(
+                            to=leave["user_email"],
+                            subject="[Leave Rejected]",
+                            body=reason_reject,
+                            cc=list(NC_EMAILS.values())
+                        )
+                        st.rerun()
